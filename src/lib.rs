@@ -3,92 +3,11 @@ pub use libusbip_sys as ffi;
 use serde::{Deserialize, Serialize};
 use util::buffer::Buffer;
 
+pub mod vhci;
+
 pub(crate) mod util {
-    pub mod singleton {
-        pub use error::Error;
-        use std::sync::atomic::AtomicUsize;
+    pub mod singleton;
 
-        mod error {
-            use std::fmt;
-
-            /// The error type for the singleton module.
-            /// Allows the `singleton::try_init` function
-            /// to return an error of the user's choice
-            /// should their initialization function fail.
-            #[derive(Debug)]
-            pub enum Error<E>
-            where
-                E: std::error::Error,
-            {
-                AlreadyInit,
-                AlreadyFailed,
-                UserSpecified(E),
-            }
-
-            impl<E> fmt::Display for Error<E>
-            where
-                E: std::error::Error,
-            {
-                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    match self {
-                        Error::AlreadyInit => write!(f, "singleton already initialized"),
-                        Error::UserSpecified(user) => write!(f, "{user}"),
-                        Error::AlreadyFailed => write!(f, "initialization had already failed"),
-                    }
-                }
-            }
-
-            impl<E> std::error::Error for Error<E> where E: std::error::Error {}
-        }
-
-        pub const UNINITIALIZED: usize = 0;
-        pub const INITIALIZING: usize = 1;
-        pub const INITIALIZED: usize = 2;
-        pub const TERMINATING: usize = 3;
-        pub const ERROR: usize = 4;
-
-        /// Attempts to initialize the singleton using the
-        /// provided `init` function, keeping synchronization
-        /// with the `state` variable.
-        ///
-        /// On first init, `state` should be set to `singleton::UNINITIALIZED` or else
-        /// `try_init` will never call `init` or worse, loop forever.
-        pub fn try_init<F, T, E>(state: &AtomicUsize, init: F) -> Result<T, Error<E>>
-        where
-            F: FnOnce() -> Result<T, E>,
-            E: std::error::Error,
-        {
-            use std::sync::atomic::Ordering;
-            let old_state = match state.compare_exchange(
-                UNINITIALIZED,
-                INITIALIZING,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(s) | Err(s) => s,
-            };
-
-            match old_state {
-                UNINITIALIZED => {
-                    let value = init()
-                        .inspect_err(|_| {
-                            state.store(ERROR, Ordering::SeqCst);
-                        })
-                        .map_err(|err| Error::UserSpecified(err))?;
-                    state.store(INITIALIZED, Ordering::SeqCst);
-                    Ok(value)
-                }
-                INITIALIZING => {
-                    while state.load(Ordering::SeqCst) == INITIALIZING {
-                        std::hint::spin_loop();
-                    }
-                    Err(Error::AlreadyInit)
-                }
-                ERROR => Err(Error::AlreadyFailed),
-                _ => Err(Error::AlreadyInit),
-            }
-        }
-    }
     pub mod buffer {
         use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -136,6 +55,30 @@ impl UsbDevice {
             protocol: self.b_device_protocol,
         }
     }
+
+    pub fn info(&self) -> Info {
+        Info {
+            devnum: self.devnum,
+            busnum: self.busnum,
+            speed: self.speed,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Info {
+    devnum: u32,
+    busnum: u32,
+    speed: u32,
+}
+impl Info {
+    fn speed(&self) -> u32 {
+        self.speed
+    }
+
+    fn devid(&self) -> u32 {
+        (self.busnum << 16) | self.devnum
+    }
 }
 
 #[derive(Debug)]
@@ -158,64 +101,6 @@ pub struct UsbInterface {
     b_interface_subclass: u8,
     b_interface_protocol: u8,
     padding: __padding::Padding,
-}
-
-pub mod vhci {
-    use std::{io, path::Path, sync::atomic::AtomicUsize};
-
-    pub use error::Error;
-    use libusbip_sys::usbip_vhci_driver_open;
-
-    use crate::util::singleton::{self, UNINITIALIZED};
-    mod error {
-        use std::fmt;
-
-        #[derive(Debug, Clone, Copy)]
-        pub enum Error {
-            OpenFailed,
-            NoFreePorts,
-            ImportFailed,
-            AlreadyOpen,
-        }
-
-        impl fmt::Display for Error {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                match self {
-                    Error::OpenFailed => write!(f, "open vhci_driver failed (is vhci_hcd loaded?)"),
-                    Error::NoFreePorts => write!(f, "no free ports"),
-                    Error::ImportFailed => write!(f, "import device failed"),
-                    Error::AlreadyOpen => write!(f, "already opened for this process"),
-                }
-            }
-        }
-
-        impl std::error::Error for Error {}
-    }
-
-    static STATE: AtomicUsize = AtomicUsize::new(UNINITIALIZED);
-    pub struct VhciDriver;
-    impl VhciDriver {
-        pub fn try_open() -> Result<Self, Error> {
-            let result = singleton::try_init(&STATE, || {
-                let rc = unsafe { usbip_vhci_driver_open() };
-                if rc < 0 {
-                    Err(Error::OpenFailed)
-                } else {
-                    Ok(Self)
-                }
-            });
-
-            result.map_err(|err| match err {
-                singleton::Error::AlreadyInit => Error::AlreadyOpen,
-                singleton::Error::UserSpecified(err) => err,
-                singleton::Error::AlreadyFailed => Error::OpenFailed,
-            })
-        }
-
-        pub fn open() -> Self {
-            Self::try_open().unwrap()
-        }
-    }
 }
 
 mod __padding {
