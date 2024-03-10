@@ -1,8 +1,10 @@
+use crate::{ffi, DeviceStatus, UsbDevice};
 use std::{io, net::TcpStream, os::fd::AsRawFd, sync::atomic::AtomicUsize};
 
 pub use error::Error;
-use libusbip_sys::{
-    usbip_names_free, usbip_vhci_attach_device2, usbip_vhci_driver_open, usbip_vhci_get_free_port,
+use ffi::{
+    usbip_imported_device, usbip_names_free, usbip_vhci_attach_device2, usbip_vhci_driver_open,
+    usbip_vhci_get_free_port, vhci_driver,
 };
 
 use crate::{
@@ -37,6 +39,7 @@ mod error {
 }
 
 static STATE: AtomicUsize = AtomicUsize::new(UNINITIALIZED);
+#[derive(Debug)]
 pub struct VhciDriver;
 
 impl VhciDriver {
@@ -77,10 +80,133 @@ impl VhciDriver {
             Ok(port)
         }
     }
+
+    fn ffi_imported_devices(&self) -> &[usbip_imported_device] {
+        // SAFETY: By entering this function, this thread is the
+        // only thread that can access the vhci driver struct, therefore
+        // the data cannot be mutated while we're working with it.
+        // Furthermore, we ensured that the driver was allocated when
+        // we initialized VhciDriver, so the data cannot be null.
+        unsafe { (*vhci_driver).idev.as_slice((*vhci_driver).nports as usize) }
+    }
+
+    pub fn imported_devices(&self) -> impl ExactSizeIterator<Item = ImportedDevice> + '_ {
+        self.ffi_imported_devices().iter().map(|idev| idev.into())
+    }
 }
 
 impl Drop for VhciDriver {
     fn drop(&mut self) {
         singleton::terminate(&STATE, || unsafe { usbip_names_free() });
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HubSpeed {
+    High = 0,
+    Super,
+}
+
+impl From<ffi::hub_speed> for HubSpeed {
+    fn from(value: ffi::hub_speed) -> Self {
+        match value {
+            ffi::hub_speed::HUB_SPEED_HIGH => HubSpeed::High,
+            ffi::hub_speed::HUB_SPEED_SUPER => HubSpeed::Super,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ImportedDevice {
+    hub: HubSpeed,
+    port: u8,
+    status: DeviceStatus,
+    udev: UsbDevice,
+}
+
+impl ImportedDevice {
+    pub fn as_udev(&self) -> &UsbDevice {
+        &self.udev
+    }
+
+    pub fn hub(&self) -> HubSpeed {
+        self.hub
+    }
+
+    pub fn port(&self) -> u8 {
+        self.port
+    }
+
+    pub fn status(&self) -> DeviceStatus {
+        self.status
+    }
+}
+
+impl From<ffi::usbip_imported_device> for ImportedDevice {
+    fn from(value: ffi::usbip_imported_device) -> Self {
+        let udev: UsbDevice = value.udev.into();
+        debug_assert_eq!(udev.info().devid(), value.devid);
+        debug_assert_eq!(udev.busnum, value.busnum as u32);
+        debug_assert_eq!(udev.devnum, value.devnum as u32);
+        Self {
+            hub: value.hub.into(),
+            port: value.port,
+            status: value.status.into(),
+            udev,
+        }
+    }
+}
+
+impl From<&ffi::usbip_imported_device> for ImportedDevice {
+    fn from(value: &ffi::usbip_imported_device) -> Self {
+        value.clone().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::DeviceStatus;
+
+    use super::*;
+
+    #[test]
+    fn singleton_vhci_driver() {
+        if let Ok(_x) = VhciDriver::try_open() {
+            VhciDriver::try_open().expect_err("driver should've failed to open a second time");
+        }
+    }
+
+    #[test]
+    fn driver_is_allocated_on_success() {
+        let Ok(_x) = VhciDriver::try_open() else {
+            return;
+        };
+        let ptr = unsafe { vhci_driver };
+        assert!(!ptr.is_null())
+    }
+
+    #[test]
+    fn iterate_imported_devices() {
+        if let Ok(x) = VhciDriver::try_open() {
+            for idev in x.ffi_imported_devices() {
+                println!(
+                    "New device - port: {}, num: {}-{}, status: {}",
+                    idev.port,
+                    idev.busnum,
+                    idev.devnum,
+                    Into::<DeviceStatus>::into(idev.status)
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn convert_ffi_idevs_into_rust_idevs() {
+        if let Ok(x) = VhciDriver::try_open() {
+            for idev in x.ffi_imported_devices() {
+                let rust_idev: ImportedDevice = idev.into();
+                dbg!(rust_idev);
+            }
+        }
     }
 }

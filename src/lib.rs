@@ -1,3 +1,5 @@
+use core::fmt;
+
 use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
 pub use libusbip_sys as ffi;
 use serde::{Deserialize, Serialize};
@@ -18,10 +20,58 @@ pub(crate) mod util {
         pub struct Buffer<const N: usize, T>(#[serde(with = "serde_helpers")] [T; N])
         where
             T: DeserializeOwned + Serialize;
+
+        impl<const N: usize, T> From<[T; N]> for Buffer<N, T>
+        where
+            T: DeserializeOwned + Serialize,
+        {
+            fn from(value: [T; N]) -> Self {
+                Self(value)
+            }
+        }
     }
 }
 
 pub mod names;
+
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceStatus {
+    DevAvailable = 0x01,
+    DevInUse,
+    DevError,
+    PortAvailable,
+    PortInitializing,
+    PortInUse,
+    PortError,
+}
+
+impl fmt::Display for DeviceStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DeviceStatus::DevAvailable => write!(f, "device is available"),
+            DeviceStatus::DevInUse => write!(f, "device is in use"),
+            DeviceStatus::DevError => write!(f, "device is unusable because of a fatal error"),
+            DeviceStatus::PortAvailable => write!(f, "port is available"),
+            DeviceStatus::PortInitializing => write!(f, "port is initializing"),
+            DeviceStatus::PortInUse => write!(f, "port is in use"),
+            DeviceStatus::PortError => write!(f, "port error"),
+        }
+    }
+}
+
+impl From<ffi::usbip_device_status> for DeviceStatus {
+    fn from(value: ffi::usbip_device_status) -> Self {
+        match value {
+            ffi::usbip_device_status::SDEV_ST_AVAILABLE => Self::DevAvailable,
+            ffi::usbip_device_status::SDEV_ST_USED => Self::DevInUse,
+            ffi::usbip_device_status::SDEV_ST_ERROR => Self::DevError,
+            ffi::usbip_device_status::VDEV_ST_NULL => Self::PortAvailable,
+            ffi::usbip_device_status::VDEV_ST_NOTASSIGNED => Self::PortInitializing,
+            ffi::usbip_device_status::VDEV_ST_USED => Self::PortInUse,
+            ffi::usbip_device_status::VDEV_ST_ERROR => Self::PortError,
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +113,27 @@ impl UsbDevice {
             devnum: self.devnum,
             busnum: self.busnum,
             speed: self.speed,
+        }
+    }
+}
+
+impl From<ffi::usbip_usb_device> for UsbDevice {
+    fn from(value: ffi::usbip_usb_device) -> Self {
+        Self {
+            path: value.path.into(),
+            busid: value.busid.into(),
+            busnum: value.busnum,
+            devnum: value.devnum,
+            speed: value.speed,
+            id_vendor: value.idVendor,
+            id_product: value.idProduct,
+            bcd_device: value.bcdDevice,
+            b_device_class: value.bDeviceClass,
+            b_device_subclass: value.bDeviceSubClass,
+            b_device_protocol: value.bDeviceProtocol,
+            b_configuration_value: value.bConfigurationValue,
+            b_num_configurations: value.bNumConfigurations,
+            b_num_interfaces: value.bNumInterfaces,
         }
     }
 }
