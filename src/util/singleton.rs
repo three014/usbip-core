@@ -1,5 +1,6 @@
 pub use error::Error;
 use std::sync::atomic::AtomicUsize;
+pub type Result<T, E> = std::result::Result<T, Error<E>>;
 
 mod error {
     use std::fmt;
@@ -46,9 +47,9 @@ pub const ERROR: usize = 4;
 ///
 /// On first init, `state` should be set to `singleton::UNINITIALIZED` or else
 /// `try_init` will never call `init` or worse, loop forever.
-pub fn try_init<F, T, E>(state: &AtomicUsize, init: F) -> Result<T, Error<E>>
+pub fn try_init<F, T, E>(state: &AtomicUsize, init: F) -> Result<T, E>
 where
-    F: FnOnce() -> Result<T, E>,
+    F: FnOnce() -> std::result::Result<T, E>,
     E: std::error::Error,
 {
     use std::sync::atomic::Ordering;

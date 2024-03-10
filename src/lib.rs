@@ -21,6 +21,8 @@ pub(crate) mod util {
     }
 }
 
+pub mod names;
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsbDevice {
@@ -87,11 +89,35 @@ pub struct ID {
     product: u16,
 }
 
+impl ID {
+    fn vendor(&self) -> u16 {
+        self.vendor
+    }
+
+    fn product(&self) -> u16 {
+        self.product
+    }
+}
+
 #[derive(Debug)]
 pub struct Class {
     class: u8,
     subclass: u8,
     protocol: u8,
+}
+
+impl Class {
+    fn class(&self) -> u8 {
+        self.class
+    }
+
+    fn subclass(&self) -> u8 {
+        self.subclass
+    }
+
+    fn protocol(&self) -> u8 {
+        self.protocol
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
