@@ -72,7 +72,7 @@ impl VhciDriver {
     pub fn try_attach_dev(&self, socket: &TcpStream, udev: &Info) -> Result<u8, Error> {
         let port = self.get_free_port(udev.speed())?;
         let rc = unsafe {
-            usbip_vhci_attach_device2(port, socket.as_raw_fd(), udev.devid(), udev.speed())
+            usbip_vhci_attach_device2(port, socket.as_raw_fd(), udev.dev_id(), udev.speed())
         };
         if rc != 0 {
             Err(Error::IoError(io::Error::last_os_error()))
@@ -145,7 +145,7 @@ impl ImportedDevice {
 impl From<ffi::usbip_imported_device> for ImportedDevice {
     fn from(value: ffi::usbip_imported_device) -> Self {
         let udev: UsbDevice = value.udev.into();
-        debug_assert_eq!(udev.info().devid(), value.devid);
+        debug_assert_eq!(udev.info().dev_id(), value.devid);
         debug_assert_eq!(udev.busnum, value.busnum as u32);
         debug_assert_eq!(udev.devnum, value.devnum as u32);
         Self {

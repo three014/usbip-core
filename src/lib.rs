@@ -1,34 +1,25 @@
 use core::fmt;
-
 use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
 pub use libusbip_sys as ffi;
 use serde::{Deserialize, Serialize};
+use std::{ffi::OsStr, io, str::FromStr};
+pub use udev;
 use util::buffer::Buffer;
+
+use crate::util::buffer::BufferFormatError;
 
 pub mod vhci;
 
 pub(crate) mod util {
+    pub mod buffer;
     pub mod singleton;
 
-    pub mod buffer {
-        use serde::{de::DeserializeOwned, Deserialize, Serialize};
+    pub fn cast_u8_to_i8_slice(a: &[u8]) -> &[i8] {
+        unsafe { std::slice::from_raw_parts(a.as_ptr() as *const i8, a.len()) }
+    }
 
-        pub mod serde_helpers;
-
-        #[repr(transparent)]
-        #[derive(Serialize, Deserialize, Debug)]
-        pub struct Buffer<const N: usize, T>(#[serde(with = "serde_helpers")] [T; N])
-        where
-            T: DeserializeOwned + Serialize;
-
-        impl<const N: usize, T> From<[T; N]> for Buffer<N, T>
-        where
-            T: DeserializeOwned + Serialize,
-        {
-            fn from(value: [T; N]) -> Self {
-                Self(value)
-            }
-        }
+    pub fn _cast_i8_to_u8_slice(a: &[i8]) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(a.as_ptr() as *const u8, a.len()) }
     }
 }
 
@@ -138,6 +129,76 @@ impl From<ffi::usbip_usb_device> for UsbDevice {
     }
 }
 
+impl TryFrom<udev::Device> for UsbDevice {
+    type Error = Box<str>;
+
+    fn try_from(udev: udev::Device) -> Result<Self, Self::Error> {
+        let buf_err = |err: BufferFormatError| err.to_string();
+
+        fn get_attribute<T, V>(udev: &udev::Device, value: V) -> Result<T, Box<str>>
+        where
+            T: FromStr,
+            <T as FromStr>::Err: ToString,
+            V: AsRef<OsStr>,
+        {
+            fn inner<'a, 'b>(
+                udev: &'a udev::Device,
+                value: &'b OsStr,
+            ) -> Result<&'a str, Box<str>> {
+                udev.attribute_value(value)
+                    .ok_or_else(|| {
+                        format!(
+                            "Problem getting device attributes: {}",
+                            io::Error::last_os_error()
+                        )
+                    })?
+                    .to_str()
+                    .ok_or_else(|| "notutf8_err".into())
+            }
+
+            inner(udev, value.as_ref())?
+                .parse::<T>()
+                .map_err(|e| e.to_string().into_boxed_str())
+        }
+
+        let path: Buffer<SYSFS_PATH_MAX, i8> = udev.syspath().try_into().map_err(buf_err)?;
+        let busid: Buffer<SYSFS_BUS_ID_SIZE, i8> = udev.sysname().try_into().map_err(buf_err)?;
+        let id = ID {
+            vendor: get_attribute(&udev, "idVendor")?,
+            product: get_attribute(&udev, "idProduct")?,
+        };
+        let info = Info {
+            busnum: get_attribute(&udev, "busnum")?,
+            devnum: udev.devnum().ok_or("devnum not found")? as u32,
+            speed: get_attribute(&udev, "speed")?,
+        };
+        let bcd_device = get_attribute(&udev, "bcdDevice")?;
+        let b_device_class = get_attribute(&udev, "bDeviceClass")?;
+        let b_device_subclass = get_attribute(&udev, "bDeviceSubClass")?;
+        let b_device_protocol = get_attribute(&udev, "bDeviceProtocol")?;
+        let b_configuration_value = get_attribute(&udev, "bConfigurationValue")?;
+        let b_num_configurations = get_attribute(&udev, "bNumConfigurations")?;
+        let b_num_interfaces = get_attribute(&udev, "bNumInterfaces")?;
+
+        Ok(Self {
+            path,
+            busid,
+            id_vendor: id.vendor,
+            id_product: id.product,
+            busnum: info.busnum,
+            devnum: info.devnum,
+            speed: info.speed,
+            bcd_device,
+            b_device_class,
+            b_device_subclass,
+            b_device_protocol,
+            b_configuration_value,
+            b_num_configurations,
+            b_num_interfaces,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct Info {
     devnum: u32,
@@ -149,7 +210,7 @@ impl Info {
         self.speed
     }
 
-    fn devid(&self) -> u32 {
+    fn dev_id(&self) -> u32 {
         (self.busnum << 16) | self.devnum
     }
 }
