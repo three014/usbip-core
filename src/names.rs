@@ -27,7 +27,7 @@ impl Names {
             unsafe {
                 let rc = usbip_names_init(f.as_ptr().cast_mut());
                 if rc != 0 {
-                    return Err(io::Error::last_os_error());
+                    Err(io::Error::last_os_error())
                 } else {
                     Ok(Self)
                 }
@@ -46,7 +46,7 @@ impl Names {
                 class.class(),
                 class.subclass(),
                 class.protocol(),
-            )
+            );
         }
     }
 
@@ -60,13 +60,13 @@ impl Names {
                 buf.as_mut().len(),
                 id.vendor(),
                 id.product(),
-            )
+            );
         }
     }
 }
 
 impl Drop for Names {
     fn drop(&mut self) {
-        singleton::terminate(&STATE, || unsafe { usbip_names_free() })
+        singleton::terminate(&STATE, || unsafe { usbip_names_free() });
     }
 }

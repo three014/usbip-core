@@ -1,12 +1,12 @@
 use core::fmt;
 use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
-pub use libusbip_sys as ffi;
+pub(crate) use libusbip_sys as ffi;
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, io, str::FromStr};
 pub use udev;
-use util::buffer::Buffer;
+pub use util::buffer::Buffer;
 
-use crate::util::buffer::BufferFormatError;
+use crate::util::buffer::FormatError;
 
 pub mod vhci;
 
@@ -15,11 +15,11 @@ pub(crate) mod util {
     pub mod singleton;
 
     pub fn cast_u8_to_i8_slice(a: &[u8]) -> &[i8] {
-        unsafe { std::slice::from_raw_parts(a.as_ptr() as *const i8, a.len()) }
+        unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<i8>(), a.len()) }
     }
 
     pub fn _cast_i8_to_u8_slice(a: &[i8]) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(a.as_ptr() as *const u8, a.len()) }
+        unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<u8>(), a.len()) }
     }
 }
 
@@ -133,18 +133,13 @@ impl TryFrom<udev::Device> for UsbDevice {
     type Error = Box<str>;
 
     fn try_from(udev: udev::Device) -> Result<Self, Self::Error> {
-        let buf_err = |err: BufferFormatError| err.to_string();
-
         fn get_attribute<T, V>(udev: &udev::Device, value: V) -> Result<T, Box<str>>
         where
             T: FromStr,
             <T as FromStr>::Err: ToString,
             V: AsRef<OsStr>,
         {
-            fn inner<'a, 'b>(
-                udev: &'a udev::Device,
-                value: &'b OsStr,
-            ) -> Result<&'a str, Box<str>> {
+            fn inner<'a>(udev: &'a udev::Device, value: &OsStr) -> Result<&'a str, Box<str>> {
                 udev.attribute_value(value)
                     .ok_or_else(|| {
                         format!(
@@ -161,6 +156,8 @@ impl TryFrom<udev::Device> for UsbDevice {
                 .map_err(|e| e.to_string().into_boxed_str())
         }
 
+        let buf_err = |err: FormatError| err.to_string();
+
         let path: Buffer<SYSFS_PATH_MAX, i8> = udev.syspath().try_into().map_err(buf_err)?;
         let busid: Buffer<SYSFS_BUS_ID_SIZE, i8> = udev.sysname().try_into().map_err(buf_err)?;
         let id = ID {
@@ -169,7 +166,7 @@ impl TryFrom<udev::Device> for UsbDevice {
         };
         let info = Info {
             busnum: get_attribute(&udev, "busnum")?,
-            devnum: udev.devnum().ok_or("devnum not found")? as u32,
+            devnum: u32::try_from(udev.devnum().ok_or("devnum not found")?).unwrap(),
             speed: get_attribute(&udev, "speed")?,
         };
         let bcd_device = get_attribute(&udev, "bcdDevice")?;
@@ -199,39 +196,47 @@ impl TryFrom<udev::Device> for UsbDevice {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Info {
     devnum: u32,
     busnum: u32,
     speed: u32,
 }
 impl Info {
-    fn speed(&self) -> u32 {
+    pub fn dev_num(&self) -> u32 {
+        self.devnum
+    }
+
+    pub fn bus_num(&self) -> u32 {
+        self.busnum
+    }
+
+    pub fn speed(&self) -> u32 {
         self.speed
     }
 
-    fn dev_id(&self) -> u32 {
+    pub fn dev_id(&self) -> u32 {
         (self.busnum << 16) | self.devnum
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct ID {
     vendor: u16,
     product: u16,
 }
 
 impl ID {
-    fn vendor(&self) -> u16 {
+    pub fn vendor(&self) -> u16 {
         self.vendor
     }
 
-    fn product(&self) -> u16 {
+    pub fn product(&self) -> u16 {
         self.product
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Class {
     class: u8,
     subclass: u8,
@@ -239,15 +244,15 @@ pub struct Class {
 }
 
 impl Class {
-    fn class(&self) -> u8 {
+    pub fn class(&self) -> u8 {
         self.class
     }
 
-    fn subclass(&self) -> u8 {
+    pub fn subclass(&self) -> u8 {
         self.subclass
     }
 
-    fn protocol(&self) -> u8 {
+    pub fn protocol(&self) -> u8 {
         self.protocol
     }
 }
@@ -291,7 +296,7 @@ mod __padding {
                 type Value = Padding;
 
                 fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    write!(formatter, "{} byte(s)", PADDING_SIZE)
+                    write!(formatter, "{PADDING_SIZE} byte(s)")
                 }
 
                 fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>

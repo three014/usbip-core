@@ -40,9 +40,9 @@ mod error {
 
 static STATE: AtomicUsize = AtomicUsize::new(UNINITIALIZED);
 #[derive(Debug)]
-pub struct VhciDriver;
+pub struct Driver;
 
-impl VhciDriver {
+impl Driver {
     pub fn try_open() -> Result<Self, Error> {
         let result = singleton::try_init(&STATE, || {
             let rc = unsafe { usbip_vhci_driver_open() };
@@ -91,11 +91,11 @@ impl VhciDriver {
     }
 
     pub fn imported_devices(&self) -> impl ExactSizeIterator<Item = ImportedDevice> + '_ {
-        self.ffi_imported_devices().iter().map(|idev| idev.into())
+        self.ffi_imported_devices().iter().map(std::convert::Into::into)
     }
 }
 
-impl Drop for VhciDriver {
+impl Drop for Driver {
     fn drop(&mut self) {
         singleton::terminate(&STATE, || unsafe { usbip_names_free() });
     }
@@ -146,8 +146,8 @@ impl From<ffi::usbip_imported_device> for ImportedDevice {
     fn from(value: ffi::usbip_imported_device) -> Self {
         let udev: UsbDevice = value.udev.into();
         debug_assert_eq!(udev.info().dev_id(), value.devid);
-        debug_assert_eq!(udev.busnum, value.busnum as u32);
-        debug_assert_eq!(udev.devnum, value.devnum as u32);
+        debug_assert_eq!(udev.busnum, u32::from(value.busnum));
+        debug_assert_eq!(udev.devnum, u32::from(value.devnum));
         Self {
             hub: value.hub.into(),
             port: value.port,
@@ -171,14 +171,14 @@ mod tests {
 
     #[test]
     fn singleton_vhci_driver() {
-        if let Ok(_x) = VhciDriver::try_open() {
-            VhciDriver::try_open().expect_err("driver should've failed to open a second time");
+        if let Ok(_x) = Driver::try_open() {
+            Driver::try_open().expect_err("driver should've failed to open a second time");
         }
     }
 
     #[test]
     fn driver_is_allocated_on_success() {
-        let Ok(_x) = VhciDriver::try_open() else {
+        let Ok(_x) = Driver::try_open() else {
             return;
         };
         let ptr = unsafe { vhci_driver };
@@ -187,10 +187,10 @@ mod tests {
 
     #[test]
     fn iterate_imported_devices() {
-        if let Ok(x) = VhciDriver::try_open() {
+        if let Ok(x) = Driver::try_open() {
             for idev in x.ffi_imported_devices() {
                 println!(
-                    "New device - port: {}, num: {}-{}, status: {}",
+                    "C Imported Device - port: {}, num: {}-{}, status: {}",
                     idev.port,
                     idev.busnum,
                     idev.devnum,
@@ -202,10 +202,16 @@ mod tests {
 
     #[test]
     fn convert_ffi_idevs_into_rust_idevs() {
-        if let Ok(x) = VhciDriver::try_open() {
+        if let Ok(x) = Driver::try_open() {
             for idev in x.ffi_imported_devices() {
                 let rust_idev: ImportedDevice = idev.into();
-                dbg!(rust_idev);
+                println!(
+                    "Rust Imported Device - port: {}, num: {}-{}, status: {}",
+                    rust_idev.port(),
+                    rust_idev.as_udev().busnum,
+                    rust_idev.as_udev().devnum,
+                    rust_idev.status()
+                )
             }
         }
     }

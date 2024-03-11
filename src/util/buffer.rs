@@ -39,11 +39,11 @@ where
 }
 
 impl<const N: usize> TryFrom<&[i8]> for Buffer<N, i8> {
-    type Error = BufferFormatError;
+    type Error = FormatError;
 
     fn try_from(value: &[i8]) -> Result<Self, Self::Error> {
         if value.len() > N {
-            Err(BufferFormatError {
+            Err(FormatError {
                 struct_size: N,
                 attempted_size: value.len(),
             })
@@ -58,7 +58,7 @@ impl<const N: usize> TryFrom<&[i8]> for Buffer<N, i8> {
 }
 
 impl<const N: usize> TryFrom<&[u8]> for Buffer<N, i8> {
-    type Error = BufferFormatError;
+    type Error = FormatError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         crate::util::cast_u8_to_i8_slice(value).try_into()
@@ -66,7 +66,7 @@ impl<const N: usize> TryFrom<&[u8]> for Buffer<N, i8> {
 }
 
 impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
-    type Error = BufferFormatError;
+    type Error = FormatError;
 
     fn try_from(value: &OsStr) -> Result<Self, Self::Error> {
         value.as_bytes().try_into()
@@ -74,7 +74,7 @@ impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
 }
 
 impl<const N: usize> TryFrom<&Path> for Buffer<N, i8> {
-    type Error = BufferFormatError;
+    type Error = FormatError;
 
     fn try_from(value: &Path) -> Result<Self, Self::Error> {
         value.as_os_str().try_into()
@@ -84,12 +84,12 @@ impl<const N: usize> TryFrom<&Path> for Buffer<N, i8> {
 
 
 #[derive(Debug, Clone, Copy)]
-pub struct BufferFormatError {
+pub struct FormatError {
     struct_size: usize,
     attempted_size: usize,
 }
 
-impl fmt::Display for BufferFormatError {
+impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -99,4 +99,4 @@ impl fmt::Display for BufferFormatError {
     }
 }
 
-impl std::error::Error for BufferFormatError {}
+impl std::error::Error for FormatError {}
