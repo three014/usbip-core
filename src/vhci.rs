@@ -4,8 +4,10 @@ use std::{io, net::TcpStream, os::fd::AsRawFd, sync::atomic::AtomicUsize};
 pub use error::Error;
 use ffi::{
     usbip_imported_device, usbip_names_free, usbip_vhci_attach_device2, usbip_vhci_driver_open,
-    usbip_vhci_get_free_port, vhci_driver,
+    usbip_vhci_get_free_port, vhci_driver, usbip_vhci_detach_device,
 };
+
+pub use ffi::VHCI_STATE_PATH as STATE_PATH;
 
 use crate::{
     util::singleton::{self, UNINITIALIZED},
@@ -61,6 +63,7 @@ impl Driver {
     }
 
     fn get_free_port(&self, speed: u32) -> Result<u8, Error> {
+        let _ = self;
         let port = unsafe { usbip_vhci_get_free_port(speed) };
         if port < 0 {
             Err(Error::NoFreePorts)
@@ -81,7 +84,19 @@ impl Driver {
         }
     }
 
+    pub fn try_detach_dev(&self, port: u8) -> Result<(), Error> {
+        let rc = unsafe {
+            usbip_vhci_detach_device(port)
+        };
+        if rc < 0 {
+            Err(Error::IoError(io::Error::last_os_error()))
+        } else {
+            Ok(())
+        }
+    }
+
     fn ffi_imported_devices(&self) -> &[usbip_imported_device] {
+        let _ = self;
         // SAFETY: By entering this function, this thread is the
         // only thread that can access the vhci driver struct, therefore
         // the data cannot be mutated while we're working with it.
@@ -91,7 +106,9 @@ impl Driver {
     }
 
     pub fn imported_devices(&self) -> impl ExactSizeIterator<Item = ImportedDevice> + '_ {
-        self.ffi_imported_devices().iter().map(std::convert::Into::into)
+        self.ffi_imported_devices()
+            .iter()
+            .map(std::convert::Into::into)
     }
 }
 
