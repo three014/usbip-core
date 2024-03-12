@@ -1,16 +1,18 @@
 use core::fmt;
-use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
-pub(crate) use libusbip_sys as ffi;
+use libusbip_sys as ffi;
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, io, str::FromStr};
+
+pub use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
 pub use udev;
-pub use util::buffer::Buffer;
+pub use util::buffer;
 
-use crate::util::buffer::FormatError;
+use buffer::{Buffer, FormatError};
 
+pub mod names;
 pub mod vhci;
 
-pub(crate) mod util {
+mod util {
     pub mod buffer;
     pub mod singleton;
 
@@ -23,7 +25,49 @@ pub(crate) mod util {
     }
 }
 
-pub mod names;
+pub mod net {
+    use crate::ffi;
+    use core::fmt;
+
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    #[repr(u32)]
+    pub enum Status {
+        Success = 0x00,
+        Failed = 0x01,
+        DevBusy = 0x02,
+        DevErr = 0x03,
+        NoDev = 0x04,
+        Unexpected = 0x05,
+    }
+
+    impl fmt::Display for Status {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Status::Success => write!(f, "Request succeeded"),
+                Status::Failed => write!(f, "Request failed"),
+                Status::DevBusy => write!(f, "Device busy (exported)"),
+                Status::DevErr => write!(f, "Device in error state"),
+                Status::NoDev => write!(f, "Device not found"),
+                Status::Unexpected => write!(f, "Unexpected response"),
+            }
+        }
+    }
+
+    impl From<crate::ffi::op_code_status> for Status {
+        fn from(value: crate::ffi::op_code_status) -> Self {
+            match value {
+                ffi::op_code_status::ST_OK => Self::Success,
+                ffi::op_code_status::ST_NA => Self::Failed,
+                ffi::op_code_status::ST_DEV_BUSY => Self::DevBusy,
+                ffi::op_code_status::ST_DEV_ERR => Self::DevErr,
+                ffi::op_code_status::ST_NODEV => Self::NoDev,
+                ffi::op_code_status::ST_ERROR => Self::Unexpected,
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum DeviceStatus {
@@ -263,54 +307,58 @@ pub struct UsbInterface {
     b_interface_class: u8,
     b_interface_subclass: u8,
     b_interface_protocol: u8,
-    padding: __padding::Padding,
+    padding: __padding::Padding<u8>,
 }
 
 mod __padding {
+    use std::marker::PhantomData;
+
     use serde::{de::Visitor, ser::SerializeTuple, Deserialize, Serialize};
 
     #[derive(Debug)]
-    pub struct Padding;
-    const PADDING_SIZE: usize = std::mem::size_of::<u8>();
+    pub struct Padding<T>(PhantomData<T>);
+    impl<T> Padding<T> {
+        const SIZE: usize = std::mem::size_of::<T>();
+    }
 
-    impl Serialize for Padding {
+    impl<T> Serialize for Padding<T> {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer,
         {
-            let mut tup = serializer.serialize_tuple(PADDING_SIZE)?;
-            for _ in 0..PADDING_SIZE {
-                tup.serialize_element(&0x41_u8)?;
+            let mut tup = serializer.serialize_tuple(Padding::<T>::SIZE)?;
+            for _ in 0..Padding::<T>::SIZE {
+                tup.serialize_element(&0x00_u8)?;
             }
             tup.end()
         }
     }
 
-    impl<'de> Deserialize<'de> for Padding {
+    impl<'de, T> Deserialize<'de> for Padding<T> {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
             D: serde::Deserializer<'de>,
         {
-            struct PaddingVisitor;
-            impl<'de> Visitor<'de> for PaddingVisitor {
-                type Value = Padding;
+            struct PaddingVisitor<T>(PhantomData<T>);
+            impl<'de, T> Visitor<'de> for PaddingVisitor<T> {
+                type Value = Padding<T>;
 
                 fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    write!(formatter, "{PADDING_SIZE} byte(s)")
+                    write!(formatter, "{} byte(s)", Padding::<T>::SIZE)
                 }
 
                 fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
                 where
                     A: serde::de::SeqAccess<'de>,
                 {
-                    for _ in 0..PADDING_SIZE {
+                    for _ in 0..Padding::<T>::SIZE {
                         seq.next_element::<u8>()?;
                     }
-                    Ok(Padding)
+                    Ok(Padding(PhantomData))
                 }
             }
 
-            deserializer.deserialize_tuple(PADDING_SIZE, PaddingVisitor)
+            deserializer.deserialize_tuple(Padding::<T>::SIZE, PaddingVisitor(PhantomData))
         }
     }
 }
