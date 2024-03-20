@@ -3,16 +3,32 @@ pub use util::buffer;
 
 #[cfg(target_family = "unix")]
 pub mod unix {
-    pub use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
-    pub use libusbip_sys::unix as ffi;
-    use serde::{Deserialize, Serialize};
-    use std::{ffi::OsStr, io, str::FromStr};
-    pub use udev;
     use crate::{
         buffer::{Buffer, FormatError},
         net::Status,
         DeviceStatus,
     };
+    pub use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
+    pub use libusbip_sys::unix as ffi;
+    use serde::{Deserialize, Serialize};
+    use std::{ffi::OsStr, io, path::Path, str::FromStr};
+    pub use udev;
+
+    impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
+        type Error = FormatError;
+
+        fn try_from(value: &OsStr) -> Result<Self, Self::Error> {
+            value.as_bytes().try_into()
+        }
+    }
+
+    impl<const N: usize> TryFrom<&Path> for Buffer<N, i8> {
+        type Error = FormatError;
+
+        fn try_from(value: &Path) -> Result<Self, Self::Error> {
+            value.as_os_str().try_into()
+        }
+    }
 
     impl From<ffi::usbip_device_status> for DeviceStatus {
         fn from(value: ffi::usbip_device_status) -> Self {

@@ -1,5 +1,4 @@
-use std::{fmt, ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
-
+use std::fmt;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub mod serde_helpers;
@@ -62,22 +61,6 @@ impl<const N: usize> TryFrom<&[u8]> for Buffer<N, i8> {
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         crate::util::cast_u8_to_i8_slice(value).try_into()
-    }
-}
-
-impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
-    type Error = FormatError;
-
-    fn try_from(value: &OsStr) -> Result<Self, Self::Error> {
-        value.as_bytes().try_into()
-    }
-}
-
-impl<const N: usize> TryFrom<&Path> for Buffer<N, i8> {
-    type Error = FormatError;
-
-    fn try_from(value: &Path) -> Result<Self, Self::Error> {
-        value.as_os_str().try_into()
     }
 }
 
