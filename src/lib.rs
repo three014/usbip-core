@@ -9,6 +9,11 @@ pub use util::buffer;
 
 use buffer::{Buffer, FormatError};
 
+#[cfg(target_family = "unix")]
+pub mod unix {
+    
+}
+
 pub mod names;
 pub mod vhci;
 

@@ -6,7 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libusbip-sys = {path = "../libusbip-sys"}
 serde = {version = "1.0.197", features = ["derive"]}
+
+[target.'cfg(unix)'.dependencies]
+libusbip-sys = {path = "../libusbip-sys"}
 udev = "0.8.0"
 
+[target.'cfg(windows)'.dependencies]
+windows = "0.54.0"
