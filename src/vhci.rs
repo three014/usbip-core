@@ -1,18 +1,15 @@
-use crate::{ffi, DeviceStatus, UsbDevice};
+use crate::unix::ffi::{self,
+    usbip_imported_device, usbip_names_free, usbip_vhci_attach_device2, usbip_vhci_detach_device,
+    usbip_vhci_driver_open, usbip_vhci_get_free_port, vhci_driver,
+};
+use crate::{
+    unix::{Info, UsbDevice},
+    util::singleton::{self, UNINITIALIZED},
+    DeviceStatus,
+};
+pub use error::Error;
 use std::{io, net::TcpStream, os::fd::AsRawFd, sync::atomic::AtomicUsize};
 
-pub use error::Error;
-use ffi::{
-    usbip_imported_device, usbip_names_free, usbip_vhci_attach_device2, usbip_vhci_driver_open,
-    usbip_vhci_get_free_port, vhci_driver, usbip_vhci_detach_device,
-};
-
-pub use ffi::VHCI_STATE_PATH as STATE_PATH;
-
-use crate::{
-    util::singleton::{self, UNINITIALIZED},
-    Info,
-};
 mod error {
     use std::{fmt, io};
 
@@ -85,9 +82,7 @@ impl Driver {
     }
 
     pub fn try_detach_dev(&self, port: u8) -> Result<(), Error> {
-        let rc = unsafe {
-            usbip_vhci_detach_device(port)
-        };
+        let rc = unsafe { usbip_vhci_detach_device(port) };
         if rc < 0 {
             Err(Error::IoError(io::Error::last_os_error()))
         } else {
@@ -159,12 +154,12 @@ impl ImportedDevice {
     }
 }
 
-impl From<ffi::usbip_imported_device> for ImportedDevice {
-    fn from(value: ffi::usbip_imported_device) -> Self {
+impl From<usbip_imported_device> for ImportedDevice {
+    fn from(value: usbip_imported_device) -> Self {
         let udev: UsbDevice = value.udev.into();
         debug_assert_eq!(udev.info().dev_id(), value.devid);
-        debug_assert_eq!(udev.busnum, u32::from(value.busnum));
-        debug_assert_eq!(udev.devnum, u32::from(value.devnum));
+        debug_assert_eq!(udev.info().bus_num(), u32::from(value.busnum));
+        debug_assert_eq!(udev.info().dev_num(), u32::from(value.devnum));
         Self {
             hub: value.hub.into(),
             port: value.port,
@@ -174,8 +169,8 @@ impl From<ffi::usbip_imported_device> for ImportedDevice {
     }
 }
 
-impl From<&ffi::usbip_imported_device> for ImportedDevice {
-    fn from(value: &ffi::usbip_imported_device) -> Self {
+impl From<&usbip_imported_device> for ImportedDevice {
+    fn from(value: &usbip_imported_device) -> Self {
         value.clone().into()
     }
 }
@@ -225,8 +220,8 @@ mod tests {
                 println!(
                     "Rust Imported Device - port: {}, num: {}-{}, status: {}",
                     rust_idev.port(),
-                    rust_idev.as_udev().busnum,
-                    rust_idev.as_udev().devnum,
+                    rust_idev.as_udev().info().bus_num(),
+                    rust_idev.as_udev().info().dev_num(),
                     rust_idev.status()
                 )
             }
