@@ -4,7 +4,6 @@ pub use util::buffer;
 #[cfg(target_family = "unix")]
 pub mod unix;
 
-pub mod vhci;
 pub mod names;
 
 mod util {
@@ -71,5 +70,26 @@ impl fmt::Display for DeviceStatus {
             DeviceStatus::PortInUse => write!(f, "port is in use"),
             DeviceStatus::PortError => write!(f, "port error"),
         }
+    }
+}
+
+pub mod vhci {
+    pub use error::Error;
+
+    pub type Result<T> = std::result::Result<T, Error>;
+
+    mod error {
+        use std::io;
+
+        #[derive(Debug)]
+        pub enum Error {
+            IO(io::Error),
+        }
+    }
+
+    pub trait Vhci: Sized {
+        fn open() -> Result<Self>;
+        fn attach() -> Result<u16>;
+        fn detach(&self, port: u16) -> Result<()>;
     }
 }

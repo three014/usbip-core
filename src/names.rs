@@ -1,7 +1,7 @@
-use std::{collections::HashMap, fs, io, num::ParseIntError, path::Path, str::FromStr};
+use std::{collections::HashMap, fs, io, num::ParseIntError, path::Path, str::FromStr, sync::Arc};
 
 #[derive(Debug)]
-pub struct Names {
+struct NamesInner {
     vendor: HashMap<VendorKey, Box<str>>,
     product: HashMap<ProductKey, Box<str>>,
     class: HashMap<ClassKey, Box<str>>,
@@ -9,7 +9,33 @@ pub struct Names {
     protocol: HashMap<ProtocolKey, Box<str>>,
 }
 
+pub struct Names {
+    inner: Arc<NamesInner>,
+}
+
 impl Names {
+    pub fn vendor(&self, vendor: u16) -> Option<&str> {
+        self.inner.vendor(vendor)
+    }
+
+    pub fn product(&self, vendor: u16, product: u16) -> Option<&str> {
+        self.inner.product(vendor, product)
+    }
+
+    pub fn class(&self, class: u8) -> Option<&str> {
+        self.inner.class(class)
+    }
+
+    pub fn subclass(&self, class: u8, subclass: u8) -> Option<&str> {
+        self.inner.subclass(class, subclass)
+    }
+
+    pub fn protocol(&self, class: u8, subclass: u8, protocol: u8) -> Option<&str> {
+        self.inner.protocol(class, subclass, protocol)
+    }
+}
+
+impl NamesInner {
     pub fn new() -> Self {
         Self {
             vendor: HashMap::new(),
@@ -220,7 +246,7 @@ pub fn parse<P>(path: P) -> io::Result<Names>
 where
     P: AsRef<Path>,
 {
-    let mut names = Names::new();
+    let mut names = NamesInner::new();
     let mut last_state = LastState::Start;
 
     for (line, _num) in fs::read_to_string(path)?.lines().zip(1usize..) {
@@ -288,5 +314,7 @@ where
         }
     }
 
-    Ok(names)
+    Ok(Names {
+        inner: Arc::from(names),
+    })
 }

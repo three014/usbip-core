@@ -8,7 +8,9 @@ pub use libusbip_sys::unix as ffi;
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, io, path::Path, str::FromStr, os::unix::ffi::OsStrExt};
 pub use udev;
+
 pub mod names;
+pub mod vhci;
 
 impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
     type Error = FormatError;
