@@ -11,6 +11,45 @@ pub use udev;
 
 pub mod names;
 pub mod vhci;
+pub mod vhci2 {
+    use std::sync::Arc;
+
+    use super::UsbDevice;
+
+    pub struct ImportedDevice {
+        class_dev: crate::unix::UsbDevice,
+        info: crate::vhci::ImportedDevice,
+    }
+
+    pub struct Driver {
+        inner: Arc<DriverInner>
+    }
+
+    struct DriverInner {
+        hc_device: udev::Device,
+        imported_devices: Vec<ImportedDevice>,
+        num_ports: usize,
+        num_controllers: usize
+    }
+
+    impl crate::vhci::VhciDriver for Driver {
+        fn open() -> crate::vhci::Result<Self> {
+            todo!()
+        }
+
+        fn detach(&self, port: u16) -> crate::vhci::Result<()> {
+            todo!()
+        }
+
+        fn imported_devices(&self) -> crate::vhci::Result<&[crate::vhci::ImportedDevice]> {
+            todo!()
+        }
+
+        fn attach(&self, socket: std::net::SocketAddr, bus_id: &str) -> crate::vhci::Result<u16> {
+            todo!()
+        }
+    }
+}
 
 impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
     type Error = FormatError;

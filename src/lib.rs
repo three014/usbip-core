@@ -1,5 +1,7 @@
 use core::fmt;
+use serde::{Serialize, Deserialize};
 pub use util::buffer;
+use util::buffer::Buffer;
 
 #[cfg(target_family = "unix")]
 pub mod unix;
@@ -73,8 +75,73 @@ impl fmt::Display for DeviceStatus {
     }
 }
 
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsbDevice {
+
+}
+
+
+mod __padding {
+    use std::marker::PhantomData;
+
+    use serde::{de::Visitor, ser::SerializeTuple, Deserialize, Serialize};
+
+    #[derive(Debug)]
+    pub struct Padding<T>(PhantomData<T>);
+    impl<T> Padding<T> {
+        const SIZE: usize = std::mem::size_of::<T>();
+    }
+
+    impl<T> Serialize for Padding<T> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let mut tup = serializer.serialize_tuple(Padding::<T>::SIZE)?;
+            for _ in 0..Padding::<T>::SIZE {
+                tup.serialize_element(&0x00_u8)?;
+            }
+            tup.end()
+        }
+    }
+
+    impl<'de, T> Deserialize<'de> for Padding<T> {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            struct PaddingVisitor<T>(PhantomData<T>);
+            impl<'de, T> Visitor<'de> for PaddingVisitor<T> {
+                type Value = Padding<T>;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    write!(formatter, "{} byte(s)", Padding::<T>::SIZE)
+                }
+
+                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+                where
+                    A: serde::de::SeqAccess<'de>,
+                {
+                    for _ in 0..Padding::<T>::SIZE {
+                        seq.next_element::<u8>()?;
+                    }
+                    Ok(Padding(PhantomData))
+                }
+            }
+
+            deserializer.deserialize_tuple(Padding::<T>::SIZE, PaddingVisitor(PhantomData))
+        }
+    }
+}
+
 pub mod vhci {
+    use std::net::SocketAddr;
+
     pub use error::Error;
+
+    use crate::DeviceStatus;
 
     pub type Result<T> = std::result::Result<T, Error>;
 
@@ -87,9 +154,52 @@ pub mod vhci {
         }
     }
 
-    pub trait Vhci: Sized {
+    #[derive(Debug, Clone, Copy)]
+    pub enum HubSpeed {
+        High = 0,
+        Super,
+    }
+
+    #[derive(Debug)]
+    pub struct ImportedDevice {
+        hub: HubSpeed,
+        port: u16,
+        status: DeviceStatus,
+        vendor: u16,
+        product: u16,
+        dev_id: u32
+    }
+
+    impl ImportedDevice {
+        pub const fn hub(&self) -> HubSpeed {
+            self.hub
+        }
+
+        pub const fn port(&self) -> u16 {
+            self.port
+        }
+
+        pub const fn status(&self) -> DeviceStatus {
+            self.status
+        }
+
+        pub const fn vendor(&self) -> u16 {
+            self.vendor
+        }
+
+        pub const fn dev_id(&self) -> u32 {
+            self.dev_id
+        }
+
+        pub const fn product(&self) -> u16 {
+            self.product
+        }
+    }
+
+    pub trait VhciDriver: Sized {
         fn open() -> Result<Self>;
-        fn attach() -> Result<u16>;
+        fn attach(&self, socket: SocketAddr, bus_id: &str) -> Result<u16>;
         fn detach(&self, port: u16) -> Result<()>;
+        fn imported_devices(&self) -> Result<&[ImportedDevice]>;
     }
 }
