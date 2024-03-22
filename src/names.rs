@@ -47,23 +47,23 @@ impl NamesInner {
     }
 
     pub fn vendor(&self, vendor: u16) -> Option<&str> {
-        self.vendor.get(&VendorKey(vendor)).map(|s| &s[..])
+        self.vendor.get(&VendorKey(vendor)).map(Box::as_ref)
     }
 
     pub fn product(&self, vendor: u16, product: u16) -> Option<&str> {
         self.product
             .get(&ProductKey { vendor, product })
-            .map(|s| &s[..])
+            .map(Box::as_ref)
     }
 
     pub fn class(&self, class: u8) -> Option<&str> {
-        self.class.get(&ClassKey(class)).map(|s| &s[..])
+        self.class.get(&ClassKey(class)).map(Box::as_ref)
     }
 
     pub fn subclass(&self, class: u8, subclass: u8) -> Option<&str> {
         self.subclass
             .get(&SubclassKey { class, subclass })
-            .map(|s| &s[..])
+            .map(Box::as_ref)
     }
 
     pub fn protocol(&self, class: u8, subclass: u8, protocol: u8) -> Option<&str> {
@@ -73,7 +73,7 @@ impl NamesInner {
                 subclass,
                 protocol,
             })
-            .map(|s| &s[..])
+            .map(Box::as_ref)
     }
 }
 
