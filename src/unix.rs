@@ -6,42 +6,111 @@ use crate::{
 pub use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
 pub use libusbip_sys::unix as ffi;
 use serde::{Deserialize, Serialize};
-use std::{ffi::OsStr, io, path::Path, str::FromStr, os::unix::ffi::OsStrExt};
+use std::{ffi::OsStr, io, os::unix::ffi::OsStrExt, path::Path, str::FromStr};
 pub use udev;
+pub use udev_helpers::Error as UdevError;
 
+mod udev_helpers {
+    use std::borrow::Cow;
+
+    #[derive(Debug)]
+    pub enum Error {
+        NoAttribute(Cow<'static, str>),
+        NoParent,
+    }
+
+    impl std::fmt::Display for Error {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            todo!()
+        }
+    }
+
+    impl std::error::Error for Error {}
+
+    impl From<Error> for crate::vhci::Error {
+        fn from(value: Error) -> Self {
+            crate::vhci::Error::Udev(value)
+        }
+    }
+
+    pub fn get_sysattr<'a>(
+        dev: &'a udev::Device,
+        attribute: Cow<'static, str>,
+    ) -> Result<&'a str, Error> {
+        Ok(dev
+            .attribute_value(attribute.as_ref())
+            .ok_or_else(|| Error::NoAttribute(attribute))?
+            .to_str()
+            .unwrap())
+    }
+}
 pub mod names;
 pub mod vhci;
 pub mod vhci2 {
-    use std::sync::Arc;
+    use std::{borrow::Cow, num::NonZeroUsize, str::FromStr};
 
-    use super::UsbDevice;
+    static BUS_TYPE: &str = "platform";
+    static DEVICE_NAME: &str = "vhci_hcd.0";
 
     pub struct ImportedDevice {
         class_dev: crate::unix::UsbDevice,
-        info: crate::vhci::ImportedDevice,
+        info: crate::vhci::ImportedDeviceInner,
+    }
+
+    impl FromStr for ImportedDevice {
+        type Err = crate::vhci::Error;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let mut lines = s.lines();
+            lines.next();
+            for line in lines {}
+            todo!()
+        }
     }
 
     pub struct Driver {
-        inner: Arc<DriverInner>
+        inner: DriverInner,
     }
 
     struct DriverInner {
         hc_device: udev::Device,
         imported_devices: Vec<ImportedDevice>,
-        num_ports: usize,
-        num_controllers: usize
+        num_controllers: NonZeroUsize,
+    }
+
+    impl DriverInner {
+        fn try_open() -> crate::vhci::Result<Self> {
+            let hc_device =
+                udev::Device::from_subsystem_sysname(BUS_TYPE.into(), DEVICE_NAME.into())?;
+            let num_ports =
+                crate::unix::udev_helpers::get_sysattr(&hc_device, Cow::Borrowed("nports"))?
+                    .parse()
+                    .expect("Parsing num_ports from str");
+            let imported_devices = (0..num_ports)
+                .map(|port| imported_device(&hc_device, port))
+                .collect::<crate::vhci::Result<Vec<ImportedDevice>>>()?;
+            let num_controllers = num_controllers(&hc_device)?;
+
+            Ok(Self {
+                hc_device,
+                imported_devices,
+                num_controllers,
+            })
+        }
     }
 
     impl crate::vhci::VhciDriver for Driver {
         fn open() -> crate::vhci::Result<Self> {
-            todo!()
+            Ok(Self {
+                inner: DriverInner::try_open()?,
+            })
         }
 
         fn detach(&self, port: u16) -> crate::vhci::Result<()> {
             todo!()
         }
 
-        fn imported_devices(&self) -> crate::vhci::Result<&[crate::vhci::ImportedDevice]> {
+        fn imported_devices(&self) -> crate::vhci::Result<&[ImportedDevice]> {
             todo!()
         }
 
@@ -49,6 +118,45 @@ pub mod vhci2 {
             todo!()
         }
     }
+
+    fn imported_device(
+        hc_device: &udev::Device,
+        port: usize,
+    ) -> crate::vhci::Result<crate::vhci::ImportedDevice> {
+        use crate::unix::udev_helpers::get_sysattr;
+
+        let attr = Cow::Owned(format!("status.{port}"));
+        get_sysattr(hc_device, attr)?.parse()
+    }
+
+    fn num_controllers(hc_device: &udev::Device) -> crate::vhci::Result<NonZeroUsize> {
+        use super::UdevError;
+        use crate::vhci::Error;
+
+        let platform = hc_device
+            .parent()
+            .ok_or_else(|| Error::Udev(UdevError::NoParent))?;
+
+        let count: NonZeroUsize = platform
+            .syspath()
+            .read_dir()?
+            .filter(|e| {
+                e.as_ref().is_ok_and(|entry| {
+                    entry
+                        .file_name()
+                        .as_os_str()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("vhci_hcd."))
+                })
+            })
+            .count()
+            .try_into()
+            .map_err(|_| Error::NoFreeControllers)?;
+
+        Ok(count)
+    }
+
+    impl crate::__private::Sealed for Driver {}
 }
 
 impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
