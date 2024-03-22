@@ -10,6 +10,10 @@ pub mod names;
 mod util {
     pub mod buffer;
     pub mod singleton;
+    pub mod __padding;
+    pub mod __private {
+        pub trait Sealed {}
+    }
 
     pub fn cast_u8_to_i8_slice(a: &[u8]) -> &[i8] {
         unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<i8>(), a.len()) }
@@ -74,8 +78,6 @@ impl fmt::Display for DeviceStatus {
     }
 }
 
-mod __padding;
-
 pub mod vhci {
     pub(crate) mod error;
     mod platform {
@@ -136,14 +138,10 @@ pub mod vhci {
         }
     }
 
-    pub trait VhciDriver: Sized + crate::__private::Sealed {
+    pub trait VhciDriver: Sized + crate::util::__private::Sealed {
         fn open() -> Result<Self>;
         fn attach(&self, socket: SocketAddr, bus_id: &str) -> Result<u16>;
         fn detach(&self, port: u16) -> Result<()>;
         fn imported_devices(&self) -> Result<&[ImportedDevice]>;
     }
-}
-
-mod __private {
-    pub trait Sealed {}
 }

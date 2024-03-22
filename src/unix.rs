@@ -156,7 +156,7 @@ pub mod vhci2 {
         Ok(count)
     }
 
-    impl crate::__private::Sealed for Driver {}
+    impl crate::util::__private::Sealed for Driver {}
 }
 
 impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
