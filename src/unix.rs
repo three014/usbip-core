@@ -1,72 +1,33 @@
-use crate::{
-    buffer::{Buffer, FormatError},
-    net::Status,
-    DeviceStatus,
-};
-pub use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
-pub use libusbip_sys::unix as ffi;
-use serde::{Deserialize, Serialize};
-use std::{ffi::OsStr, io, os::unix::ffi::OsStrExt, path::Path, str::FromStr};
-pub use udev;
-pub use udev_helpers::Error as UdevError;
-
-mod udev_helpers {
-    use std::borrow::Cow;
-
-    #[derive(Debug)]
-    pub enum Error {
-        NoAttribute(Cow<'static, str>),
-        NoParent,
-    }
-
-    impl std::fmt::Display for Error {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            todo!()
-        }
-    }
-
-    impl std::error::Error for Error {}
-
-    impl From<Error> for crate::vhci::Error {
-        fn from(value: Error) -> Self {
-            crate::vhci::Error::Udev(value)
-        }
-    }
-
-    pub fn get_sysattr<'a>(
-        dev: &'a udev::Device,
-        attribute: Cow<'static, str>,
-    ) -> Result<&'a str, Error> {
-        Ok(dev
-            .attribute_value(attribute.as_ref())
-            .ok_or_else(|| Error::NoAttribute(attribute))?
-            .to_str()
-            .unwrap())
-    }
-}
 pub mod names;
+mod udev_helpers;
 pub mod vhci;
 pub mod vhci2 {
-    use std::{borrow::Cow, num::NonZeroUsize, str::FromStr};
+    use std::{borrow::Cow, fmt::Write, num::NonZeroUsize, str::FromStr};
 
     static BUS_TYPE: &str = "platform";
     static DEVICE_NAME: &str = "vhci_hcd.0";
 
-    pub struct ImportedDevice {
-        class_dev: crate::unix::UsbDevice,
-        info: crate::vhci::ImportedDeviceInner,
-    }
-
-    impl FromStr for ImportedDevice {
+    impl FromStr for crate::vhci::ImportedDevice {
         type Err = crate::vhci::Error;
 
         fn from_str(s: &str) -> Result<Self, Self::Err> {
-            let mut lines = s.lines();
-            lines.next();
-            for line in lines {}
+            let mut tokens = s.splitn(7, ' ');
+            let hub: crate::vhci::HubSpeed = crate::util::get_token(&mut tokens);
+            let port: u16 = crate::util::get_token(&mut tokens);
+            let status: crate::DeviceStatus = crate::util::get_token(&mut tokens);
+            let _speed: u32 = crate::util::get_token(&mut tokens);
+            let dev_id: u32 = crate::util::get_token(&mut tokens);
+            let _sockfd: u32 = crate::util::get_token(&mut tokens);
+            let bus_id = tokens.next().unwrap().trim();
+
+            // TODO: We need the udev context to get usbdevice details
+
             todo!()
         }
     }
+
+    #[derive(Debug)]
+    pub struct ImportedDevices(Box<[crate::vhci::ImportedDevice]>);
 
     pub struct Driver {
         inner: DriverInner,
@@ -74,27 +35,47 @@ pub mod vhci2 {
 
     struct DriverInner {
         hc_device: udev::Device,
-        imported_devices: Vec<ImportedDevice>,
-        num_controllers: NonZeroUsize,
+        imported_devices: ImportedDevices,
     }
 
     impl DriverInner {
         fn try_open() -> crate::vhci::Result<Self> {
-            let hc_device =
-                udev::Device::from_subsystem_sysname(BUS_TYPE.into(), DEVICE_NAME.into())?;
-            let num_ports =
-                crate::unix::udev_helpers::get_sysattr(&hc_device, Cow::Borrowed("nports"))?
-                    .parse()
-                    .expect("Parsing num_ports from str");
-            let imported_devices = (0..num_ports)
-                .map(|port| imported_device(&hc_device, port))
-                .collect::<crate::vhci::Result<Vec<ImportedDevice>>>()?;
+            use crate::unix::udev_helpers::{get_sysattr, get_sysattr_clone_err};
+
+            let context = udev::Udev::new()?;
+            let hc_device = udev::Device::from_subsystem_sysname_with_context(
+                context.clone(),
+                BUS_TYPE.into(),
+                DEVICE_NAME.into(),
+            )?;
+            let num_ports: NonZeroUsize = get_sysattr(&hc_device, Cow::Borrowed("nports"))?
+                .parse()
+                .expect("Parsing num_ports from str");
             let num_controllers = num_controllers(&hc_device)?;
+
+            let mut attr_buf = String::new();
+            let mut idevs = Vec::with_capacity(num_ports.get());
+
+            write!(&mut attr_buf, "status").unwrap();
+
+            for i in 0..num_controllers.get() {
+                if i > 0 {
+                    attr_buf.clear();
+                    write!(&mut attr_buf, "status.{i}").unwrap();
+                }
+                let attr = get_sysattr_clone_err(&hc_device, &attr_buf)?;
+
+                let mut lines = attr.lines();
+                lines.next();
+                for line in lines {
+                    let idev = line.parse()?;
+                    idevs.push(idev);
+                }
+            }
 
             Ok(Self {
                 hc_device,
-                imported_devices,
-                num_controllers,
+                imported_devices: ImportedDevices(idevs.into_boxed_slice()),
             })
         }
     }
@@ -110,23 +91,13 @@ pub mod vhci2 {
             todo!()
         }
 
-        fn imported_devices(&self) -> crate::vhci::Result<&[ImportedDevice]> {
+        fn imported_devices(&self) -> crate::vhci::Result<&[crate::vhci::ImportedDevice]> {
             todo!()
         }
 
         fn attach(&self, socket: std::net::SocketAddr, bus_id: &str) -> crate::vhci::Result<u16> {
             todo!()
         }
-    }
-
-    fn imported_device(
-        hc_device: &udev::Device,
-        port: usize,
-    ) -> crate::vhci::Result<crate::vhci::ImportedDevice> {
-        use crate::unix::udev_helpers::get_sysattr;
-
-        let attr = Cow::Owned(format!("status.{port}"));
-        get_sysattr(hc_device, attr)?.parse()
     }
 
     fn num_controllers(hc_device: &udev::Device) -> crate::vhci::Result<NonZeroUsize> {
@@ -158,6 +129,18 @@ pub mod vhci2 {
 
     impl crate::util::__private::Sealed for Driver {}
 }
+
+use crate::{
+    net::Status,
+    util::buffer::{Buffer, FormatError},
+    DeviceStatus,
+};
+pub use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
+pub use libusbip_sys::unix as ffi;
+use serde::{Deserialize, Serialize};
+use std::{ffi::OsStr, io, os::unix::ffi::OsStrExt, path::Path, str::FromStr};
+pub use udev;
+pub use udev_helpers::Error as UdevError;
 
 impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
     type Error = FormatError;
