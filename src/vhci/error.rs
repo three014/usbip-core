@@ -9,6 +9,8 @@ pub enum Error {
     Udev(crate::unix::UdevError),
     #[cfg(unix)]
     NoFreeControllers,
+    #[cfg(unix)]
+    NoFreePorts,
 }
 
 impl fmt::Display for Error {

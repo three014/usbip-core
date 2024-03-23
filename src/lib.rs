@@ -1,6 +1,8 @@
 use core::fmt;
+use std::str::FromStr;
 
-pub use util::buffer;
+use serde::{Deserialize, Serialize};
+use util::buffer::Buffer;
 
 #[cfg(unix)]
 mod unix;
@@ -8,9 +10,11 @@ mod unix;
 pub mod names;
 
 mod util {
+    use std::str::FromStr;
+
+    pub mod __padding;
     pub mod buffer;
     pub mod singleton;
-    pub mod __padding;
     pub mod __private {
         pub trait Sealed {}
     }
@@ -21,6 +25,14 @@ mod util {
 
     pub fn _cast_i8_to_u8_slice(a: &[i8]) -> &[u8] {
         unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<u8>(), a.len()) }
+    }
+
+    pub fn get_token<'a, 'b: 'a, T>(tokens: &'a mut impl Iterator<Item = &'b str>) -> T
+    where
+        T: FromStr,
+        T::Err: std::error::Error,
+    {
+        tokens.next().unwrap().trim().parse().unwrap()
     }
 }
 
@@ -53,6 +65,29 @@ pub mod net {
     }
 }
 
+pub const USBIP_VERSION: usize = 0x111;
+pub const DEV_PATH_MAX: usize = 256;
+pub const BUS_ID_SIZE: usize = 32;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsbDevice {
+    path: Buffer<DEV_PATH_MAX, i8>,
+    busid: Buffer<BUS_ID_SIZE, i8>,
+    busnum: u32,
+    devnum: u32,
+    speed: u32,
+    id_vendor: u16,
+    id_product: u16,
+    bcd_device: u16,
+    b_device_class: u8,
+    b_device_subclass: u8,
+    b_device_protocol: u8,
+    b_configuration_value: u8,
+    b_num_configurations: u8,
+    b_num_interfaces: u8,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum DeviceStatus {
     DevAvailable = 0x01,
@@ -78,21 +113,52 @@ impl fmt::Display for DeviceStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ParseDeviceStatusError {
+    Empty,
+    Invalid,
+}
+
+impl fmt::Display for ParseDeviceStatusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+
+impl std::error::Error for ParseDeviceStatusError {}
+
+impl FromStr for DeviceStatus {
+    type Err = ParseDeviceStatusError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        todo!()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsbInterface {
+    b_interface_class: u8,
+    b_interface_subclass: u8,
+    b_interface_protocol: u8,
+    padding: util::__padding::Padding<u8>,
+}
+
 pub mod vhci {
     pub(crate) mod error;
     mod platform {
         #[cfg(unix)]
-        pub use crate::unix::vhci2::Driver as Driver;
-        #[cfg(unix)]
-        pub use crate::unix::vhci2::ImportedDevice as ImportedDevice;
+        pub use crate::unix::vhci2::Driver;
     }
 
-    use std::net::SocketAddr;
     use crate::DeviceStatus;
+    use crate::UsbDevice;
+    use core::fmt;
+    use std::net::SocketAddr;
+    use std::str::FromStr;
 
     pub use error::Error;
     pub use platform::Driver;
-    pub use platform::ImportedDevice;
 
     pub type Result<T> = std::result::Result<T, Error>;
 
@@ -102,17 +168,45 @@ pub mod vhci {
         Super,
     }
 
-    #[derive(Debug, Clone)]
-    pub(crate) struct ImportedDeviceInner {
+    impl FromStr for HubSpeed {
+        type Err = ParseHubSpeedError;
+
+        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+            match s {
+                "ss" => Ok(Self::Super),
+                "hs" => Ok(Self::High),
+                "" => Err(ParseHubSpeedError::Empty),
+                _ => Err(ParseHubSpeedError::Invalid),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub enum ParseHubSpeedError {
+        Empty,
+        Invalid,
+    }
+
+    impl fmt::Display for ParseHubSpeedError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            todo!()
+        }
+    }
+
+    impl std::error::Error for ParseHubSpeedError {}
+
+    #[derive(Debug)]
+    pub struct ImportedDevice {
         hub: HubSpeed,
         port: u16,
         status: DeviceStatus,
         vendor: u16,
         product: u16,
         dev_id: u32,
+        udev: UsbDevice,
     }
 
-    impl ImportedDeviceInner {
+    impl ImportedDevice {
         pub const fn hub(&self) -> HubSpeed {
             self.hub
         }
@@ -135,6 +229,10 @@ pub mod vhci {
 
         pub const fn product(&self) -> u16 {
             self.product
+        }
+
+        pub const fn usb_dev(&self) -> &UsbDevice {
+            &self.udev
         }
     }
 
