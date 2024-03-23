@@ -210,31 +210,24 @@ where
 }
 
 fn parse_class(line: &str) -> Option<(ClassKey, Box<str>)> {
-    line.strip_prefix("C ")
-        .and_then(|possible_class| parse_value(possible_class, str::parse::<ClassKey>))
+    parse_value(line.strip_prefix("C ")?, str::parse::<ClassKey>)
 }
 
 fn parse_product(line: &str, vendor: u16) -> Option<(ProductKey, Box<str>)> {
-    line.strip_prefix('\t').and_then(|possible_product| {
-        parse_value(possible_product, |token| {
-            ProductKey::from_str_and_vendor(token, vendor)
-        })
+    parse_value(line.strip_prefix('\t')?, |token| {
+        ProductKey::from_str_and_vendor(token, vendor)
     })
 }
 
 fn parse_subclass(line: &str, class: u8) -> Option<(SubclassKey, Box<str>)> {
-    line.strip_prefix('\t').and_then(|possible_subclass| {
-        parse_value(possible_subclass, |token| {
-            SubclassKey::from_str_and_class(token, class)
-        })
+    parse_value(line.strip_prefix('\t')?, |token| {
+        SubclassKey::from_str_and_class(token, class)
     })
 }
 
 fn parse_protocol(line: &str, class: u8, subclass: u8) -> Option<(ProtocolKey, Box<str>)> {
-    line.strip_prefix("\t\t").and_then(|possible_protocol| {
-        parse_value(possible_protocol, |token| {
-            ProtocolKey::from_str_class_and_subclass(token, class, subclass)
-        })
+    parse_value(line.strip_prefix("\t\t")?, |token| {
+        ProtocolKey::from_str_class_and_subclass(token, class, subclass)
     })
 }
 
