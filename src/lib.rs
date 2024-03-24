@@ -15,6 +15,48 @@ mod util {
     pub mod __padding;
     pub mod buffer;
     pub mod singleton;
+    pub mod beef {
+        use std::{
+            borrow::{Borrow, Cow},
+            ops::Deref,
+        };
+
+        pub enum Beef<'a, B>
+        where
+            B: 'static + ?Sized + ToOwned,
+        {
+            Borrowed(&'a B),
+            Owned(<B as ToOwned>::Owned),
+            Static(&'static B),
+        }
+
+        impl<'a, B> From<Beef<'a, B>> for Cow<'static, B>
+        where
+            B: ?Sized + ToOwned + 'static,
+        {
+            fn from(value: Beef<'a, B>) -> Self {
+                match value {
+                    Beef::Borrowed(borrowed) => Cow::Owned(borrowed.to_owned()),
+                    Beef::Owned(owned) => Cow::Owned(owned),
+                    Beef::Static(staticc) => Cow::Borrowed(staticc),
+                }
+            }
+        }
+
+        impl<'a, B> Deref for Beef<'a, B>
+        where
+            B: ?Sized + ToOwned + 'static,
+        {
+            type Target = B;
+
+            fn deref(&self) -> &Self::Target {
+                match *self {
+                    Beef::Borrowed(borrowed) | Beef::Static(borrowed) => borrowed,
+                    Beef::Owned(ref owned) => owned.borrow(),
+                }
+            }
+        }
+    }
     pub mod __private {
         pub trait Sealed {}
     }
@@ -148,7 +190,7 @@ pub mod vhci {
     pub(crate) mod error;
     mod platform {
         #[cfg(unix)]
-        pub use crate::unix::vhci2::Driver;
+        pub use crate::unix::vhci2::UnixDriver as Driver;
     }
 
     use crate::DeviceStatus;
@@ -196,7 +238,7 @@ pub mod vhci {
     impl std::error::Error for ParseHubSpeedError {}
 
     #[derive(Debug)]
-    pub struct ImportedDevice {
+    pub(crate) struct ImportedDeviceInner {
         hub: HubSpeed,
         port: u16,
         status: DeviceStatus,
@@ -206,7 +248,7 @@ pub mod vhci {
         udev: UsbDevice,
     }
 
-    impl ImportedDevice {
+    impl ImportedDeviceInner {
         pub const fn hub(&self) -> HubSpeed {
             self.hub
         }
@@ -240,6 +282,6 @@ pub mod vhci {
         fn open() -> Result<Self>;
         fn attach(&self, socket: SocketAddr, bus_id: &str) -> Result<u16>;
         fn detach(&self, port: u16) -> Result<()>;
-        fn imported_devices(&self) -> Result<&[ImportedDevice]>;
+        fn imported_devices(&self) -> Result<&[ImportedDeviceInner]>;
     }
 }

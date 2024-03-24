@@ -2,34 +2,46 @@ pub mod names;
 mod udev_helpers;
 pub mod vhci;
 pub mod vhci2 {
-    use std::{borrow::Cow, fmt::Write, num::NonZeroUsize, str::FromStr};
+    use std::{borrow::Cow, ffi::OsStr, fmt::Write, num::NonZeroUsize, str::FromStr};
+
+    use crate::{
+        util::{beef::Beef, buffer::Buffer, get_token},
+        vhci::HubSpeed,
+        DeviceStatus,
+    };
+
+    use super::udev_helpers::{ParseAttributeError, UdevAttribute, UdevHelper};
 
     static BUS_TYPE: &str = "platform";
     static DEVICE_NAME: &str = "vhci_hcd.0";
 
-    impl FromStr for crate::vhci::ImportedDevice {
-        type Err = crate::vhci::Error;
+    impl TryFrom<UdevAttribute<'_, '_>> for ImportedDevice {
+        type Error = ParseAttributeError;
 
-        fn from_str(s: &str) -> Result<Self, Self::Err> {
-            let mut tokens = s.splitn(7, ' ');
-            let hub: crate::vhci::HubSpeed = crate::util::get_token(&mut tokens);
-            let port: u16 = crate::util::get_token(&mut tokens);
-            let status: crate::DeviceStatus = crate::util::get_token(&mut tokens);
-            let _speed: u32 = crate::util::get_token(&mut tokens);
-            let dev_id: u32 = crate::util::get_token(&mut tokens);
-            let _sockfd: u32 = crate::util::get_token(&mut tokens);
-            let bus_id = tokens.next().unwrap().trim();
-
-            // TODO: We need the udev context to get usbdevice details
-
+        fn try_from(value: UdevAttribute<'_, '_>) -> Result<Self, Self::Error> {
+            let UdevAttribute { udev, attr, data } = value;
+            let mut tokens = data.splitn(7, ' ');
+            let hub: HubSpeed = get_token(&mut tokens);
+            let port: u16 = get_token(&mut tokens);
+            let status: DeviceStatus = get_token(&mut tokens);
+            let _speed: u32 = get_token(&mut tokens);
+            let devid: u32 = get_token(&mut tokens);
+            let _sockfd: u32 = get_token(&mut tokens);
+            let busid: Buffer<{ crate::BUS_ID_SIZE }, i8> =
+                OsStr::new(tokens.next().unwrap().trim()).try_into()?;
             todo!()
         }
     }
 
     #[derive(Debug)]
-    pub struct ImportedDevices(Box<[crate::vhci::ImportedDevice]>);
+    pub struct ImportedDevice {
+        inner: crate::vhci::ImportedDeviceInner,
+    }
 
-    pub struct Driver {
+    #[derive(Debug)]
+    pub struct ImportedDevices(Box<[ImportedDevice]>);
+
+    pub struct UnixDriver {
         inner: DriverInner,
     }
 
@@ -40,17 +52,13 @@ pub mod vhci2 {
 
     impl DriverInner {
         fn try_open() -> crate::vhci::Result<Self> {
-            use crate::unix::udev_helpers::{get_sysattr, get_sysattr_clone_err};
-
             let context = udev::Udev::new()?;
             let hc_device = udev::Device::from_subsystem_sysname_with_context(
                 context.clone(),
                 BUS_TYPE.into(),
                 DEVICE_NAME.into(),
             )?;
-            let num_ports: NonZeroUsize = get_sysattr(&hc_device, Cow::Borrowed("nports"))?
-                .parse()
-                .expect("Parsing num_ports from str");
+            let num_ports: NonZeroUsize = hc_device.parse_sysattr(Beef::Static("nports"))?;
             let num_controllers = num_controllers(&hc_device)?;
 
             let mut attr_buf = String::new();
@@ -63,12 +71,17 @@ pub mod vhci2 {
                     attr_buf.clear();
                     write!(&mut attr_buf, "status.{i}").unwrap();
                 }
-                let attr = get_sysattr_clone_err(&hc_device, &attr_buf)?;
 
-                let mut lines = attr.lines();
+                let status = hc_device.sysattr(Beef::Borrowed(&attr_buf))?;
+                let mut lines = status.lines();
                 lines.next();
                 for line in lines {
-                    let idev = line.parse()?;
+                    let idev = UdevAttribute {
+                        udev: &hc_device,
+                        attr: Beef::Borrowed(&attr_buf),
+                        data: line,
+                    }
+                    .try_into()?;
                     idevs.push(idev);
                 }
             }
@@ -80,7 +93,7 @@ pub mod vhci2 {
         }
     }
 
-    impl crate::vhci::VhciDriver for Driver {
+    impl crate::vhci::VhciDriver for UnixDriver {
         fn open() -> crate::vhci::Result<Self> {
             Ok(Self {
                 inner: DriverInner::try_open()?,
@@ -91,7 +104,7 @@ pub mod vhci2 {
             todo!()
         }
 
-        fn imported_devices(&self) -> crate::vhci::Result<&[crate::vhci::ImportedDevice]> {
+        fn imported_devices(&self) -> crate::vhci::Result<&[crate::vhci::ImportedDeviceInner]> {
             todo!()
         }
 
@@ -104,9 +117,7 @@ pub mod vhci2 {
         use super::UdevError;
         use crate::vhci::Error;
 
-        let platform = hc_device
-            .parent()
-            .ok_or_else(|| Error::Udev(UdevError::NoParent))?;
+        let platform = hc_device.parent().ok_or(Error::Udev(UdevError::NoParent))?;
 
         let count: NonZeroUsize = platform
             .syspath()
@@ -127,7 +138,7 @@ pub mod vhci2 {
         Ok(count)
     }
 
-    impl crate::util::__private::Sealed for Driver {}
+    impl crate::util::__private::Sealed for UnixDriver {}
 }
 
 use crate::{
