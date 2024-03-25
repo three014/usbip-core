@@ -191,6 +191,8 @@ pub mod vhci {
     mod platform {
         #[cfg(unix)]
         pub use crate::unix::vhci2::UnixDriver as Driver;
+        #[cfg(unix)]
+        pub use crate::unix::vhci2::ImportedDevice as ImportedDevice;
     }
 
     use crate::DeviceStatus;
@@ -201,6 +203,7 @@ pub mod vhci {
 
     pub use error::Error;
     pub use platform::Driver;
+    pub use platform::ImportedDevice;
 
     pub type Result<T> = std::result::Result<T, Error>;
 
@@ -282,6 +285,6 @@ pub mod vhci {
         fn open() -> Result<Self>;
         fn attach(&self, socket: SocketAddr, bus_id: &str) -> Result<u16>;
         fn detach(&self, port: u16) -> Result<()>;
-        fn imported_devices(&self) -> Result<&[ImportedDeviceInner]>;
+        fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ ImportedDevice> + '_;
     }
 }

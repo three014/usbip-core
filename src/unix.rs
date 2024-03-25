@@ -2,11 +2,16 @@ pub mod names;
 mod udev_helpers;
 pub mod vhci;
 pub mod vhci2 {
-    use std::{borrow::Cow, ffi::OsStr, fmt::Write, num::NonZeroUsize, str::FromStr};
+    use std::{
+        collections::{HashMap, VecDeque},
+        ffi::OsStr,
+        fmt::Write,
+        num::NonZeroUsize,
+    };
 
     use crate::{
         util::{beef::Beef, buffer::Buffer, get_token},
-        vhci::HubSpeed,
+        vhci::{HubSpeed, ImportedDeviceInner},
         DeviceStatus,
     };
 
@@ -15,7 +20,12 @@ pub mod vhci2 {
     static BUS_TYPE: &str = "platform";
     static DEVICE_NAME: &str = "vhci_hcd.0";
 
-    impl TryFrom<UdevAttribute<'_, '_>> for ImportedDevice {
+    enum MaybeIdev {
+        Some(ImportedDevice),
+        None(u16),
+    }
+
+    impl TryFrom<UdevAttribute<'_, '_>> for MaybeIdev {
         type Error = ParseAttributeError;
 
         fn try_from(value: UdevAttribute<'_, '_>) -> Result<Self, Self::Error> {
@@ -29,17 +39,50 @@ pub mod vhci2 {
             let _sockfd: u32 = get_token(&mut tokens);
             let busid: Buffer<{ crate::BUS_ID_SIZE }, i8> =
                 OsStr::new(tokens.next().unwrap().trim()).try_into()?;
-            todo!()
+            match status {
+                // This port is unused or not ready yet
+                DeviceStatus::PortAvailable | DeviceStatus::PortInitializing => {
+                    Ok(MaybeIdev::None(port))
+                }
+                _ => todo!(),
+            }
         }
     }
 
     #[derive(Debug)]
     pub struct ImportedDevice {
-        inner: crate::vhci::ImportedDeviceInner,
+        inner: ImportedDeviceInner,
     }
 
     #[derive(Debug)]
-    pub struct ImportedDevices(Box<[ImportedDevice]>);
+    pub struct ImportedDevices {
+        active: HashMap<u16, ImportedDevice>,
+        available: VecDeque<u16>,
+    }
+
+    impl ImportedDevices {
+        pub fn new() -> Self {
+            Self {
+                active: HashMap::new(),
+                available: VecDeque::new(),
+            }
+        }
+    }
+
+    impl FromIterator<MaybeIdev> for ImportedDevices {
+        fn from_iter<T: IntoIterator<Item = MaybeIdev>>(iter: T) -> Self {
+            let mut imported_devices = ImportedDevices::new();
+            for item in iter {
+                match item {
+                    MaybeIdev::Some(idev) => {
+                        imported_devices.active.insert(idev.inner.port(), idev);
+                    }
+                    MaybeIdev::None(port) => imported_devices.available.push_front(port),
+                }
+            }
+            imported_devices
+        }
+    }
 
     pub struct UnixDriver {
         inner: DriverInner,
@@ -48,6 +91,8 @@ pub mod vhci2 {
     struct DriverInner {
         hc_device: udev::Device,
         imported_devices: ImportedDevices,
+        num_controllers: NonZeroUsize,
+        num_ports: NonZeroUsize,
     }
 
     impl DriverInner {
@@ -76,20 +121,29 @@ pub mod vhci2 {
                 let mut lines = status.lines();
                 lines.next();
                 for line in lines {
-                    let idev = UdevAttribute {
+                    let attr = UdevAttribute {
                         udev: &hc_device,
                         attr: Beef::Borrowed(&attr_buf),
                         data: line,
-                    }
-                    .try_into()?;
-                    idevs.push(idev);
+                    };
+                    idevs.push(MaybeIdev::try_from(attr)?);
                 }
             }
 
             Ok(Self {
                 hc_device,
-                imported_devices: ImportedDevices(idevs.into_boxed_slice()),
+                imported_devices: idevs.into_iter().collect(),
+                num_controllers,
+                num_ports,
             })
+        }
+
+        const fn udev(&self) -> &udev::Device {
+            &self.hc_device
+        }
+
+        fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ ImportedDevice> + '_ {
+            self.imported_devices.active.values()
         }
     }
 
@@ -104,8 +158,8 @@ pub mod vhci2 {
             todo!()
         }
 
-        fn imported_devices(&self) -> crate::vhci::Result<&[crate::vhci::ImportedDeviceInner]> {
-            todo!()
+        fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ ImportedDevice> + '_ {
+            self.inner.imported_devices()
         }
 
         fn attach(&self, socket: std::net::SocketAddr, bus_id: &str) -> crate::vhci::Result<u16> {
@@ -143,15 +197,21 @@ pub mod vhci2 {
 
 use crate::{
     net::Status,
-    util::buffer::{Buffer, FormatError},
+    unix::udev_helpers::UdevHelper,
+    util::{
+        beef::Beef,
+        buffer::{Buffer, FormatError},
+    },
     DeviceStatus,
 };
 pub use ffi::{SYSFS_BUS_ID_SIZE, SYSFS_PATH_MAX};
 pub use libusbip_sys::unix as ffi;
 use serde::{Deserialize, Serialize};
-use std::{ffi::OsStr, io, os::unix::ffi::OsStrExt, path::Path, str::FromStr};
+use std::{borrow::Cow, ffi::OsStr, io, os::unix::ffi::OsStrExt, path::Path, str::FromStr};
 pub use udev;
 pub use udev_helpers::Error as UdevError;
+
+use self::udev_helpers::ParseAttributeError;
 
 impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
     type Error = FormatError;
@@ -258,6 +318,48 @@ impl From<ffi::usbip_usb_device> for UsbDevice {
             b_num_configurations: value.bNumConfigurations,
             b_num_interfaces: value.bNumInterfaces,
         }
+    }
+}
+
+impl TryFrom<udev::Device> for crate::UsbDevice {
+    type Error = ParseAttributeError;
+
+    fn try_from(udev: udev::Device) -> Result<Self, Self::Error> {
+        let path: Buffer<{ crate::DEV_PATH_MAX }, i8> = udev.syspath().try_into()?;
+        let busid: Buffer<{ crate::BUS_ID_SIZE }, i8> = udev.sysname().try_into()?;
+        let id_vendor: u16 = udev.parse_sysattr(Beef::Static("idVendor"))?;
+        let id_product: u16 = udev.parse_sysattr(Beef::Static("idProduct"))?;
+        let busnum: u32 = udev.parse_sysattr(Beef::Static("busnum"))?;
+        let devnum = u32::try_from(
+            udev.devnum()
+                .ok_or(ParseAttributeError::NoAttribute(Cow::Borrowed("devnum")))?,
+        )
+        .unwrap();
+        let speed: u32 = udev.parse_sysattr(Beef::Static("speed"))?;
+        let bcd_device: u16 = udev.parse_sysattr(Beef::Static("bcdDevice"))?;
+        let b_device_class: u8 = udev.parse_sysattr(Beef::Static("bDeviceClass"))?;
+        let b_device_subclass: u8 = udev.parse_sysattr(Beef::Static("bDeviceSubClass"))?;
+        let b_device_protocol: u8 = udev.parse_sysattr(Beef::Static("bDeviceProtocol"))?;
+        let b_configuration_value: u8 = udev.parse_sysattr(Beef::Static("bConfigurationValue"))?;
+        let b_num_configurations: u8 = udev.parse_sysattr(Beef::Static("bNumConfigurations"))?;
+        let b_num_interfaces: u8 = udev.parse_sysattr(Beef::Static("bNumInterfaces"))?;
+
+        Ok(Self {
+            path,
+            busid,
+            id_vendor,
+            id_product,
+            busnum,
+            devnum,
+            speed,
+            bcd_device,
+            b_device_class,
+            b_device_subclass,
+            b_device_protocol,
+            b_configuration_value,
+            b_num_configurations,
+            b_num_interfaces,
+        })
     }
 }
 
