@@ -1,4 +1,12 @@
-use std::{collections::HashMap, fs, io, num::ParseIntError, path::Path, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs,
+    io::{self, BufRead, BufReader},
+    num::ParseIntError,
+    path::Path,
+    str::FromStr,
+    sync::Arc,
+};
 
 #[derive(Debug)]
 struct NamesInner {
@@ -241,8 +249,14 @@ where
 {
     let mut names = NamesInner::new();
     let mut last_state = LastState::Start;
+    let reader = BufReader::new(fs::File::open(path)?);
 
-    for (line, _num) in fs::read_to_string(path)?.lines().zip(1usize..) {
+    for (line, _num) in reader
+        .lines()
+        .map(|result| result.unwrap_or(String::new()))
+        .zip(1usize..)
+    {
+        let line = line.as_str();
         if can_skip(line) {
             continue;
         }

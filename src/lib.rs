@@ -144,13 +144,13 @@ pub enum DeviceStatus {
 impl fmt::Display for DeviceStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DeviceStatus::DevAvailable => write!(f, "device is available"),
-            DeviceStatus::DevInUse => write!(f, "device is in use"),
-            DeviceStatus::DevError => write!(f, "device is unusable because of a fatal error"),
-            DeviceStatus::PortAvailable => write!(f, "port is available"),
-            DeviceStatus::PortInitializing => write!(f, "port is initializing"),
-            DeviceStatus::PortInUse => write!(f, "port is in use"),
-            DeviceStatus::PortError => write!(f, "port error"),
+            DeviceStatus::DevAvailable => write!(f, "Device Available"),
+            DeviceStatus::DevInUse => write!(f, "Device in Use"),
+            DeviceStatus::DevError => write!(f, "Device Unusable Due To Fatal Error"),
+            DeviceStatus::PortAvailable => write!(f, "Port Available"),
+            DeviceStatus::PortInitializing => write!(f, "Port Initializing"),
+            DeviceStatus::PortInUse => write!(f, "Port in Use"),
+            DeviceStatus::PortError => write!(f, "Port Error"),
         }
     }
 }
@@ -208,6 +208,20 @@ pub enum DeviceSpeed {
     SuperPlus,
 }
 
+impl fmt::Display for DeviceSpeed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DeviceSpeed::Unknown => write!(f, "Unknown Speed"),
+            DeviceSpeed::Low => write!(f, "Low Speed (1.5 Mbit/s)"),
+            DeviceSpeed::Full => write!(f, "Full Speed (12 Mbit/s)"),
+            DeviceSpeed::High => write!(f, "High Speed (480 Mbit/s)"),
+            DeviceSpeed::Wireless => write!(f, "Wireless Speed (??)"),
+            DeviceSpeed::Super => write!(f, "Super Speed (5 Gbit/s)"),
+            DeviceSpeed::SuperPlus => write!(f, "Super Speed Plus (10 Gbit/s)"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum TryFromDeviceSpeedError {
     Invalid,
@@ -215,64 +229,36 @@ pub enum TryFromDeviceSpeedError {
 
 impl fmt::Display for TryFromDeviceSpeedError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        match self {
+            TryFromDeviceSpeedError::Invalid => write!(f, "Invalid Device Speed"),
+        }
     }
 }
 
 impl std::error::Error for TryFromDeviceSpeedError {}
 
-#[derive(Debug, Clone)]
-pub enum ParseDeviceSpeedError {
-    Parse(ParseIntError),
-    TryFrom(TryFromIntError),
-}
-
-impl fmt::Display for ParseDeviceSpeedError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
-    }
-}
-
-impl std::error::Error for ParseDeviceSpeedError {}
-
-impl From<ParseIntError> for ParseDeviceSpeedError {
-    fn from(value: ParseIntError) -> Self {
-        Self::Parse(value)
-    }
-}
-
-impl From<TryFromIntError> for ParseDeviceSpeedError {
-    fn from(value: TryFromIntError) -> Self {
-        Self::TryFrom(value)
-    }
-}
-
 impl FromStr for DeviceSpeed {
-    type Err = ParseDeviceSpeedError;
+    type Err = ParseIntError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.parse::<u32>()?.try_into().map_err(Into::into)
+        match s {
+            "unknown" => Ok(Self::Unknown),
+            "1.5" => Ok(Self::Low),
+            "53.3-480" => Ok(Self::Wireless),
+            num => Ok(Self::from(num.parse::<u32>()?))
+        }
     }
 }
 
-impl TryFrom<u32> for DeviceSpeed {
-    type Error = TryFromIntError;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        let speed = match value {
-            0 => Self::Unknown,
-            1 => Self::Low,
-            2 => Self::Full,
-            3 => Self::High,
-            4 => Self::Wireless,
-            5 => Self::Super,
-            6 => Self::SuperPlus,
-            _ => match u32::try_from(usize::max_value()) {
-                Ok(_) => unreachable!(),
-                Err(e) => Err(e),
-            }?,
-        };
-        Ok(speed)
+impl From<u32> for DeviceSpeed {
+    fn from(value: u32) -> Self {
+        match value {
+            12 => Self::Full,
+            480 => Self::High,
+            5000 => Self::Super,
+            10000 => Self::SuperPlus,
+            _ => Self::Unknown,
+        }
     }
 }
 

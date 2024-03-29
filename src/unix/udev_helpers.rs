@@ -1,6 +1,6 @@
 use std::{
     borrow::{Borrow, Cow},
-    num::{NonZeroUsize, ParseIntError}, str::FromStr,
+    num::ParseIntError, str::FromStr,
 };
 
 use crate::util::{beef::Beef, buffer};
@@ -15,9 +15,9 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::NoParent => write!(f, "udev has no parent device"),
-            Error::Parse(_) => todo!(),
-            Error::TryFromDev(_) => todo!(),
+            Error::NoParent => write!(f, "No parent device"),
+            Error::Parse(p) => write!(f, "Attribute: {p}"),
+            Error::TryFromDev(d) => write!(f, "Device Read: {d}"),
         }
     }
 }
@@ -32,13 +32,16 @@ impl From<Error> for crate::vhci::Error {
 
 #[derive(Debug)]
 pub enum TryFromDeviceError {
-    IO(std::io::Error),
+    Io(std::io::Error),
     Parse(ParseAttributeError),
 }
 
 impl std::fmt::Display for TryFromDeviceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        match self {
+            TryFromDeviceError::Io(i) => write!(f, "I/O: {i}"),
+            TryFromDeviceError::Parse(p) => write!(f, "Parse: {p}"),
+        }
     }
 }
 
@@ -46,7 +49,7 @@ impl std::error::Error for TryFromDeviceError {}
 
 impl From<std::io::Error> for TryFromDeviceError {
     fn from(value: std::io::Error) -> Self {
-        Self::IO(value)
+        Self::Io(value)
     }
 }
 
@@ -69,12 +72,7 @@ pub trait UdevHelper: crate::util::__private::Sealed + Borrow<udev::Device> {
         <T as FromStr>::Err: Into<ParseAttributeError>,
     {
         let udev: &udev::Device = self.borrow();
-        let data = if let Some(value) = udev.attribute_value(&*attr) {
-            value
-        } else {
-            return Err(ParseAttributeError::NoAttribute(Cow::from(attr)));
-        };
-        let data = data.to_str().ok_or_else(|| ParseAttributeError::NotUtf8)?;
+        let data = udev.sysattr(attr)?;
         data.parse().map_err(|e: T::Err| e.into())
     }
 
@@ -101,7 +99,13 @@ pub enum ParseAttributeError {
 
 impl std::fmt::Display for ParseAttributeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        match self {
+            ParseAttributeError::NoAttribute(s) => write!(f, "No attribute found for \"{s}\""),
+            ParseAttributeError::Int(i) => write!(f, "Int: {i}"),
+            ParseAttributeError::Dyn(d) => write!(f, "Any: {d}"),
+            ParseAttributeError::NotUtf8 => write!(f, "Attribute value was not in utf8"),
+            ParseAttributeError::Buffer(b) => write!(f, "Buffer Format: {b}"),
+        }
     }
 }
 

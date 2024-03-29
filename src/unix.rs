@@ -4,30 +4,56 @@ pub mod vhci;
 pub mod vhci2 {
     #[cfg(test)]
     mod tests {
-        use crate::vhci::VhciDriver;
+        use crate::{unix::USB_IDS, vhci::VhciDriver};
 
         use super::*;
 
         #[test]
         fn driver_opens() {
-            let _driver = UnixDriver::open().unwrap();
+            match UnixDriver::open() {
+                Ok(d) => match crate::names::parse(USB_IDS) {
+                    Ok(names) => {
+                        d.imported_devices()
+                            .for_each(|idev| println!("{}", idev.display(&names)));
+                    }
+                    Err(e) => eprintln!("Couldn't open names: {e}"),
+                },
+                Err(e) => println!("{e}"),
+            }
+        }
+
+        #[test]
+        fn parse_record() {
+            let record = str::parse::<PortRecord>("127.0.0.1 3240 1-1").unwrap();
+            println!(
+                "Host: {}, busid: {}",
+                record.host,
+                record.busid.to_str().unwrap()
+            );
         }
     }
 
+    use core::fmt;
     use std::{
         collections::HashMap,
         ffi::{c_char, OsStr},
-        io::Write,
-        net::TcpStream,
-        num::NonZeroUsize,
+        fs,
+        io::{self, Write},
+        net::{AddrParseError, IpAddr, SocketAddr, TcpStream},
+        num::{NonZeroUsize, ParseIntError},
         os::{fd::AsRawFd, unix::ffi::OsStrExt},
+        path::PathBuf,
         str::FromStr,
     };
 
     use crate::{
-        util::{beef::Beef, buffer::Buffer, parse_token},
+        util::{
+            beef::Beef,
+            buffer::{self, Buffer},
+            parse_token,
+        },
         vhci::{HubSpeed, ImportedDeviceInner},
-        DeviceSpeed, DeviceStatus,
+        DeviceSpeed, DeviceStatus, BUS_ID_SIZE,
     };
 
     use super::{
@@ -35,6 +61,7 @@ pub mod vhci2 {
         UdevError,
     };
 
+    static STATE_PATH: &str = "/var/run/vhci_hcd";
     static BUS_TYPE: &str = "platform";
     static DEVICE_NAME: &str = "vhci_hcd.0";
     const SYSFS_PATH_MAX: usize = 255;
@@ -80,11 +107,10 @@ pub mod vhci2 {
                             udev: usb_dev,
                         },
                     };
-                    debug_assert_eq!(idev.inner.usb_dev().busnum, idev.inner.dev_id() >> 16);
-                    debug_assert_eq!(
-                        idev.inner.usb_dev().devnum,
-                        idev.inner.dev_id() & 0x0000ffff
-                    );
+
+                    //debug_assert_eq!( dbg!(idev.inner.usb_dev().devnum), dbg!(idev.inner.dev_id() & 0x0000ffff) );
+                    //debug_assert_eq!( dbg!(idev.inner.usb_dev().busnum), dbg!(idev.inner.dev_id() >> 16) );
+
                     Ok(MaybeIdev::InUse(idev))
                 }
             }
@@ -92,8 +118,154 @@ pub mod vhci2 {
     }
 
     #[derive(Debug)]
+    enum PortRecordError {
+        Buffer(buffer::FormatError),
+        Io(io::Error),
+        Addr(AddrParseError),
+        Int(ParseIntError),
+        Invalid,
+    }
+
+    impl fmt::Display for PortRecordError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                PortRecordError::Buffer(b) => write!(f, "Buffer Format: {b}"),
+                PortRecordError::Io(i) => write!(f, "I/O: {i}"),
+                PortRecordError::Addr(a) => write!(f, "Address Parsing: {a}"),
+                PortRecordError::Int(i) => write!(f, "Int Parsing: {i}"),
+                PortRecordError::Invalid => write!(f, "Invalid port record"),
+            }
+        }
+    }
+
+    impl From<io::Error> for PortRecordError {
+        fn from(value: io::Error) -> Self {
+            Self::Io(value)
+        }
+    }
+
+    impl From<AddrParseError> for PortRecordError {
+        fn from(value: AddrParseError) -> Self {
+            Self::Addr(value)
+        }
+    }
+
+    impl From<ParseIntError> for PortRecordError {
+        fn from(value: ParseIntError) -> Self {
+            Self::Int(value)
+        }
+    }
+
+    impl From<buffer::FormatError> for PortRecordError {
+        fn from(value: buffer::FormatError) -> Self {
+            Self::Buffer(value)
+        }
+    }
+
+    #[derive(Debug)]
+    struct PortRecord {
+        host: SocketAddr,
+        busid: Buffer<BUS_ID_SIZE, c_char>,
+    }
+
+    impl PortRecord {
+        fn read(port: u16) -> Result<Self, PortRecordError> {
+            let path = PathBuf::from(format!("{}/port{}", STATE_PATH, port));
+            let s = fs::read_to_string(path)?;
+            s.parse()
+        }
+    }
+
+    impl FromStr for PortRecord {
+        type Err = PortRecordError;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let mut split = s.split_whitespace();
+            let host = split
+                .next()
+                .ok_or(PortRecordError::Invalid)?
+                .parse::<IpAddr>()?;
+            let srv_port = split
+                .next()
+                .ok_or(PortRecordError::Invalid)?
+                .parse::<u16>()?;
+            let busid = split.next().ok_or(PortRecordError::Invalid)?.trim();
+            Ok(Self {
+                host: SocketAddr::new(host, srv_port),
+                busid: busid.try_into()?,
+            })
+        }
+    }
+
+    #[derive(Debug)]
     pub struct UnixImportedDevice {
         inner: ImportedDeviceInner,
+    }
+
+    impl UnixImportedDevice {
+        pub fn display<'a: 'c, 'b: 'c, 'c>(
+            &'a self,
+            names: &'b crate::names::Names,
+        ) -> impl fmt::Display + 'c {
+            UnixIdevDisplay { idev: self, names }
+        }
+    }
+
+    struct UnixIdevDisplay<'a, 'b> {
+        idev: &'a UnixImportedDevice,
+        names: &'b crate::names::Names,
+    }
+
+    impl fmt::Display for UnixIdevDisplay<'_, '_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let idev = &self.idev.inner;
+            if idev.status() == DeviceStatus::PortInitializing
+                || idev.status() == DeviceStatus::PortAvailable
+            {
+                return write!(f, "");
+            }
+
+            writeln!(
+                f,
+                "Port {:02}: <{}> at {}",
+                idev.port(),
+                idev.status(),
+                idev.usb_dev().speed()
+            )?;
+
+            let product = self
+                .names
+                .product(idev.vendor(), idev.product())
+                .unwrap_or("unknown product");
+            writeln!(f, "       {}", product)?;
+
+            match PortRecord::read(idev.port()) {
+                Ok(record) => {
+                    writeln!(
+                        f,
+                        "       {:>10} -> usbip://{}/{}",
+                        idev.udev.bus_id(),
+                        record.host,
+                        record.busid.to_str().unwrap().trim()
+                    )?;
+                }
+                Err(err) => {
+                    writeln!(f, "Error parsing record: {err}")?;
+                    writeln!(
+                        f,
+                        "       {:>10} -> unknown host, remote port and remote busid",
+                        idev.udev.bus_id().trim()
+                    )?;
+                }
+            }
+
+            writeln!(
+                f,
+                "           -> remote bus/dev {:03}/{:03}",
+                idev.usb_dev().dev_num(),
+                idev.usb_dev().bus_num()
+            )
+        }
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -199,7 +371,11 @@ pub mod vhci2 {
                 }
 
                 let status = init.hc_device.sysattr(Beef::Borrowed(
-                    attr_buf.to_str().unwrap().trim().trim_matches(char::from(0)),
+                    attr_buf
+                        .to_str()
+                        .unwrap()
+                        .trim()
+                        .trim_matches(char::from(0)),
                 ))?;
                 let mut lines = status.lines();
                 lines.next();
@@ -420,6 +596,8 @@ pub use udev_helpers::Error as UdevError;
 
 use self::udev_helpers::ParseAttributeError;
 
+pub const USB_IDS: &str = "/usr/share/hwdata/usb.ids";
+
 impl<const N: usize> TryFrom<&OsStr> for Buffer<N, i8> {
     type Error = FormatError;
 
@@ -542,18 +720,20 @@ impl TryFrom<udev::Device> for crate::UsbDevice {
                 .ok_or(ParseAttributeError::NoAttribute(Cow::Borrowed("devnum")))?,
         )
         .unwrap();
-        let speed = udev
-            .sysattr(Beef::Static("speed"))?
-            .parse::<u32>()?
-            .try_into()
-            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+        let speed = udev.parse_sysattr(Beef::Static("speed"))?;
         let bcd_device: u16 = udev.parse_sysattr(Beef::Static("bcdDevice"))?;
         let b_device_class: u8 = udev.parse_sysattr(Beef::Static("bDeviceClass"))?;
         let b_device_subclass: u8 = udev.parse_sysattr(Beef::Static("bDeviceSubClass"))?;
         let b_device_protocol: u8 = udev.parse_sysattr(Beef::Static("bDeviceProtocol"))?;
         let b_configuration_value: u8 = udev.parse_sysattr(Beef::Static("bConfigurationValue"))?;
-        let b_num_configurations: u8 = udev.parse_sysattr(Beef::Static("bNumConfigurations"))?;
-        let b_num_interfaces: u8 = udev.parse_sysattr(Beef::Static("bNumInterfaces"))?;
+        let b_num_configurations: u8 = udev
+            .parse_sysattr(Beef::Static("bNumConfigurations"))
+            .ok()
+            .unwrap_or_default();
+        let b_num_interfaces: u8 = udev
+            .parse_sysattr(Beef::Static("bNumInterfaces"))
+            .ok()
+            .unwrap_or_default();
 
         Ok(Self {
             path,

@@ -3,7 +3,7 @@ use std::{io, net::{SocketAddr, TcpStream}};
 
 #[derive(Debug)]
 pub enum Error {
-    IO(io::Error),
+    Io(io::Error),
     AttachFailed(AttachError),
     #[cfg(unix)]
     Udev(crate::unix::UdevError),
@@ -15,7 +15,13 @@ pub enum Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        match self {
+            Error::Io(i) => write!(f, "VHCI I/O: {i}"),
+            Error::AttachFailed(a) => write!(f, "VHCI Attach Failed: {a}"),
+            Error::Udev(u) => write!(f, "VHCI Udev: {u}"),
+            Error::NoFreeControllers => todo!(),
+            Error::NoFreePorts => todo!(),
+        }
     }
 }
 
@@ -56,7 +62,7 @@ impl std::error::Error for AttachError {}
 
 impl From<io::Error> for Error {
     fn from(value: io::Error) -> Self {
-        Self::IO(value)
+        Self::Io(value)
     }
 }
 

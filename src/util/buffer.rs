@@ -98,6 +98,14 @@ impl<const N: usize> TryFrom<&[u8]> for Buffer<N, c_char> {
     }
 }
 
+impl<const N: usize> TryFrom<&str> for Buffer<N, c_char> {
+    type Error = FormatError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.as_bytes().try_into()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct FormatError {
     struct_size: usize,
