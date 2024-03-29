@@ -3,7 +3,7 @@ use std::{
     num::ParseIntError, str::FromStr,
 };
 
-use crate::util::{beef::Beef, buffer};
+use crate::containers::{beef::Beef, buffer};
 
 #[derive(Debug)]
 pub enum Error {
