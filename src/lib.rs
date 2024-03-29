@@ -1,5 +1,10 @@
 use core::fmt;
-use std::str::FromStr;
+use std::{
+    ffi::{OsStr, c_char},
+    num::{ParseIntError, TryFromIntError},
+    path::Path,
+    str::FromStr,
+};
 
 use serde::{Deserialize, Serialize};
 use util::buffer::Buffer;
@@ -13,68 +18,36 @@ mod util {
     use std::str::FromStr;
 
     pub mod __padding;
+    pub mod beef;
     pub mod buffer;
     pub mod singleton;
-    pub mod beef {
-        use std::{
-            borrow::{Borrow, Cow},
-            ops::Deref,
-        };
-
-        pub enum Beef<'a, B>
-        where
-            B: 'static + ?Sized + ToOwned,
-        {
-            Borrowed(&'a B),
-            Owned(<B as ToOwned>::Owned),
-            Static(&'static B),
-        }
-
-        impl<'a, B> From<Beef<'a, B>> for Cow<'static, B>
-        where
-            B: ?Sized + ToOwned + 'static,
-        {
-            fn from(value: Beef<'a, B>) -> Self {
-                match value {
-                    Beef::Borrowed(borrowed) => Cow::Owned(borrowed.to_owned()),
-                    Beef::Owned(owned) => Cow::Owned(owned),
-                    Beef::Static(staticc) => Cow::Borrowed(staticc),
-                }
-            }
-        }
-
-        impl<'a, B> Deref for Beef<'a, B>
-        where
-            B: ?Sized + ToOwned + 'static,
-        {
-            type Target = B;
-
-            fn deref(&self) -> &Self::Target {
-                match *self {
-                    Beef::Borrowed(borrowed) | Beef::Static(borrowed) => borrowed,
-                    Beef::Owned(ref owned) => owned.borrow(),
-                }
-            }
-        }
-    }
     pub mod __private {
         pub trait Sealed {}
     }
 
-    pub fn cast_u8_to_i8_slice(a: &[u8]) -> &[i8] {
+    fn cast_u8_to_i8_slice(a: &[u8]) -> &[i8] {
         unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<i8>(), a.len()) }
     }
 
-    pub fn _cast_i8_to_u8_slice(a: &[i8]) -> &[u8] {
+    fn cast_i8_to_u8_slice(a: &[i8]) -> &[u8] {
         unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<u8>(), a.len()) }
     }
 
-    pub fn get_token<'a, 'b: 'a, T>(tokens: &'a mut impl Iterator<Item = &'b str>) -> T
+    pub fn parse_token<'a, 'b: 'a, T>(tokens: &'a mut impl Iterator<Item = &'b str>) -> T
     where
         T: FromStr,
         T::Err: std::error::Error,
     {
-        tokens.next().unwrap().trim().parse().unwrap()
+        tokens
+            .next()
+            .expect("There should be another item in the string stream")
+            .trim()
+            .parse()
+            .expect("Token should be valid")
+    }
+
+    pub fn cast_i8_to_u8_mut_slice(a: &mut [i8]) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(a.as_mut_ptr().cast::<u8>(), a.len()) }
     }
 }
 
@@ -114,11 +87,11 @@ pub const BUS_ID_SIZE: usize = 32;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsbDevice {
-    path: Buffer<DEV_PATH_MAX, i8>,
-    busid: Buffer<BUS_ID_SIZE, i8>,
+    path: Buffer<DEV_PATH_MAX, c_char>,
+    busid: Buffer<BUS_ID_SIZE, c_char>,
     busnum: u32,
     devnum: u32,
-    speed: u32,
+    speed: DeviceSpeed,
     id_vendor: u16,
     id_product: u16,
     bcd_device: u16,
@@ -130,7 +103,34 @@ pub struct UsbDevice {
     b_num_interfaces: u8,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl UsbDevice {
+    pub fn path(&self) -> &Path {
+        let s = self.path.to_str().unwrap().trim();
+        Path::new(OsStr::new(s))
+    }
+
+    pub fn bus_id(&self) -> &str {
+        self.busid.to_str().unwrap().trim()
+    }
+
+    pub const fn dev_id(&self) -> u32 {
+        (self.bus_num() << 16) | self.dev_num()
+    }
+
+    pub const fn speed(&self) -> DeviceSpeed {
+        self.speed
+    }
+
+    pub const fn bus_num(&self) -> u32 {
+        self.busnum
+    }
+
+    pub const fn dev_num(&self) -> u32 {
+        self.devnum
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceStatus {
     DevAvailable = 0x01,
     DevInUse,
@@ -155,10 +155,10 @@ impl fmt::Display for DeviceStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseDeviceStatusError {
-    Empty,
     Invalid,
+    Parse(ParseIntError),
 }
 
 impl fmt::Display for ParseDeviceStatusError {
@@ -173,7 +173,17 @@ impl FromStr for DeviceStatus {
     type Err = ParseDeviceStatusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        todo!()
+        let status = match s.parse::<usize>().map_err(Self::Err::Parse)? {
+            1 => Self::DevAvailable,
+            2 => Self::DevInUse,
+            3 => Self::DevError,
+            4 => Self::PortAvailable,
+            5 => Self::PortInitializing,
+            6 => Self::PortInUse,
+            7 => Self::PortError,
+            _ => return Err(ParseDeviceStatusError::Invalid),
+        };
+        Ok(status)
     }
 }
 
@@ -186,31 +196,135 @@ pub struct UsbInterface {
     padding: util::__padding::Padding<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u32)]
+pub enum DeviceSpeed {
+    Unknown = 0,
+    Low,
+    Full,
+    High,
+    Wireless,
+    Super,
+    SuperPlus,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TryFromDeviceSpeedError {
+    Invalid,
+}
+
+impl fmt::Display for TryFromDeviceSpeedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+
+impl std::error::Error for TryFromDeviceSpeedError {}
+
+#[derive(Debug, Clone)]
+pub enum ParseDeviceSpeedError {
+    Parse(ParseIntError),
+    TryFrom(TryFromIntError),
+}
+
+impl fmt::Display for ParseDeviceSpeedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+
+impl std::error::Error for ParseDeviceSpeedError {}
+
+impl From<ParseIntError> for ParseDeviceSpeedError {
+    fn from(value: ParseIntError) -> Self {
+        Self::Parse(value)
+    }
+}
+
+impl From<TryFromIntError> for ParseDeviceSpeedError {
+    fn from(value: TryFromIntError) -> Self {
+        Self::TryFrom(value)
+    }
+}
+
+impl FromStr for DeviceSpeed {
+    type Err = ParseDeviceSpeedError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<u32>()?.try_into().map_err(Into::into)
+    }
+}
+
+impl TryFrom<u32> for DeviceSpeed {
+    type Error = TryFromIntError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        let speed = match value {
+            0 => Self::Unknown,
+            1 => Self::Low,
+            2 => Self::Full,
+            3 => Self::High,
+            4 => Self::Wireless,
+            5 => Self::Super,
+            6 => Self::SuperPlus,
+            _ => match u32::try_from(usize::max_value()) {
+                Ok(_) => unreachable!(),
+                Err(e) => Err(e),
+            }?,
+        };
+        Ok(speed)
+    }
+}
+
 pub mod vhci {
     pub(crate) mod error;
     mod platform {
         #[cfg(unix)]
         pub use crate::unix::vhci2::UnixDriver as Driver;
         #[cfg(unix)]
-        pub use crate::unix::vhci2::ImportedDevice as ImportedDevice;
+        pub use crate::unix::vhci2::UnixImportedDevice as ImportedDevice;
+        #[cfg(unix)]
+        pub use crate::unix::vhci2::UsbId;
     }
 
     use crate::DeviceStatus;
     use crate::UsbDevice;
     use core::fmt;
-    use std::net::SocketAddr;
+    use std::net::TcpStream;
     use std::str::FromStr;
 
     pub use error::Error;
     pub use platform::Driver;
     pub use platform::ImportedDevice;
+    pub use platform::UsbId;
 
     pub type Result<T> = std::result::Result<T, Error>;
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum HubSpeed {
         High = 0,
         Super,
+    }
+
+    impl From<HubSpeed> for crate::DeviceSpeed {
+        fn from(value: HubSpeed) -> Self {
+            match value {
+                HubSpeed::High => crate::DeviceSpeed::High,
+                HubSpeed::Super => crate::DeviceSpeed::Super,
+            }
+        }
+    }
+
+    impl TryFrom<crate::DeviceSpeed> for HubSpeed {
+        type Error = crate::TryFromDeviceSpeedError;
+
+        fn try_from(value: crate::DeviceSpeed) -> std::result::Result<Self, Self::Error> {
+            match value {
+                crate::DeviceSpeed::High => Ok(Self::High),
+                crate::DeviceSpeed::Super => Ok(Self::Super),
+                _ => Err(Self::Error::Invalid),
+            }
+        }
     }
 
     impl FromStr for HubSpeed {
@@ -242,13 +356,13 @@ pub mod vhci {
 
     #[derive(Debug)]
     pub(crate) struct ImportedDeviceInner {
-        hub: HubSpeed,
-        port: u16,
-        status: DeviceStatus,
-        vendor: u16,
-        product: u16,
-        dev_id: u32,
-        udev: UsbDevice,
+        pub(crate) hub: HubSpeed,
+        pub(crate) port: u16,
+        pub(crate) status: DeviceStatus,
+        pub(crate) vendor: u16,
+        pub(crate) product: u16,
+        pub(crate) devid: u32,
+        pub(crate) udev: UsbDevice,
     }
 
     impl ImportedDeviceInner {
@@ -269,7 +383,7 @@ pub mod vhci {
         }
 
         pub const fn dev_id(&self) -> u32 {
-            self.dev_id
+            self.devid
         }
 
         pub const fn product(&self) -> u16 {
@@ -281,10 +395,21 @@ pub mod vhci {
         }
     }
 
+    #[derive(Debug, Clone)]
+    pub(crate) struct UsbIdInner<'a> {
+        pub(crate) bus_id: &'a str,
+    }
+
+    impl UsbIdInner<'_> {
+        pub const fn bus_id(&self) -> &str {
+            self.bus_id
+        }
+    }
+
     pub trait VhciDriver: Sized + crate::util::__private::Sealed {
         fn open() -> Result<Self>;
-        fn attach(&self, socket: SocketAddr, bus_id: &str) -> Result<u16>;
-        fn detach(&self, port: u16) -> Result<()>;
+        fn attach(&mut self, socket: TcpStream, usb_id: UsbId) -> Result<u16>;
+        fn detach(&mut self, port: u16) -> Result<()>;
         fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ ImportedDevice> + '_;
     }
 }

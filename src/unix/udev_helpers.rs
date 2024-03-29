@@ -1,6 +1,6 @@
 use std::{
     borrow::{Borrow, Cow},
-    num::{NonZeroUsize, ParseIntError},
+    num::{NonZeroUsize, ParseIntError}, str::FromStr,
 };
 
 use crate::util::{beef::Beef, buffer};
@@ -9,6 +9,7 @@ use crate::util::{beef::Beef, buffer};
 pub enum Error {
     NoParent,
     Parse(ParseAttributeError),
+    TryFromDev(TryFromDeviceError),
 }
 
 impl std::fmt::Display for Error {
@@ -16,6 +17,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::NoParent => write!(f, "udev has no parent device"),
             Error::Parse(_) => todo!(),
+            Error::TryFromDev(_) => todo!(),
         }
     }
 }
@@ -28,57 +30,43 @@ impl From<Error> for crate::vhci::Error {
     }
 }
 
-pub struct UdevAttribute<'a, 'b> {
-    pub udev: &'a udev::Device,
-    pub attr: Beef<'b, str>,
-    pub data: &'a str,
+#[derive(Debug)]
+pub enum TryFromDeviceError {
+    IO(std::io::Error),
+    Parse(ParseAttributeError),
 }
 
-impl TryFrom<UdevAttribute<'_, '_>> for usize {
-    type Error = ParseIntError;
-
-    fn try_from(value: UdevAttribute) -> Result<Self, Self::Error> {
-        value.data.parse()
+impl std::fmt::Display for TryFromDeviceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
     }
 }
 
-impl TryFrom<UdevAttribute<'_, '_>> for u32 {
-    type Error = ParseIntError;
+impl std::error::Error for TryFromDeviceError {}
 
-    fn try_from(value: UdevAttribute) -> Result<Self, Self::Error> {
-        value.data.parse()
+impl From<std::io::Error> for TryFromDeviceError {
+    fn from(value: std::io::Error) -> Self {
+        Self::IO(value)
     }
 }
 
-impl TryFrom<UdevAttribute<'_, '_>> for u16 {
-    type Error = ParseIntError;
-
-    fn try_from(value: UdevAttribute) -> Result<Self, Self::Error> {
-        value.data.parse()
+impl From<ParseAttributeError> for TryFromDeviceError {
+    fn from(value: ParseAttributeError) -> Self {
+        Self::Parse(value)
     }
 }
 
-impl TryFrom<UdevAttribute<'_, '_>> for u8 {
-    type Error = ParseIntError;
-
-    fn try_from(value: UdevAttribute) -> Result<Self, Self::Error> {
-        value.data.parse()
-    }
-}
-
-impl TryFrom<UdevAttribute<'_, '_>> for NonZeroUsize {
-    type Error = ParseIntError;
-
-    fn try_from(value: UdevAttribute) -> Result<Self, Self::Error> {
-        value.data.parse()
+impl From<TryFromDeviceError> for Error {
+    fn from(value: TryFromDeviceError) -> Self {
+        Self::TryFromDev(value)
     }
 }
 
 pub trait UdevHelper: crate::util::__private::Sealed + Borrow<udev::Device> {
     fn parse_sysattr<'a, 'b, T>(&'a self, attr: Beef<'b, str>) -> Result<T, ParseAttributeError>
     where
-        T: TryFrom<UdevAttribute<'a, 'b>>,
-        <T as TryFrom<UdevAttribute<'a, 'b>>>::Error: Into<ParseAttributeError>,
+        T: FromStr,
+        <T as FromStr>::Err: Into<ParseAttributeError>,
     {
         let udev: &udev::Device = self.borrow();
         let data = if let Some(value) = udev.attribute_value(&*attr) {
@@ -87,9 +75,7 @@ pub trait UdevHelper: crate::util::__private::Sealed + Borrow<udev::Device> {
             return Err(ParseAttributeError::NoAttribute(Cow::from(attr)));
         };
         let data = data.to_str().ok_or_else(|| ParseAttributeError::NotUtf8)?;
-        UdevAttribute { udev, attr, data }
-            .try_into()
-            .map_err(|e: T::Error| e.into())
+        data.parse().map_err(|e: T::Err| e.into())
     }
 
     fn sysattr<'a, 'b>(&'a self, attr: Beef<'b, str>) -> Result<&'a str, ParseAttributeError> {
@@ -110,7 +96,7 @@ pub enum ParseAttributeError {
     Int(ParseIntError),
     Dyn(Box<dyn std::error::Error>),
     NotUtf8,
-    Buffer(buffer::FormatError)
+    Buffer(buffer::FormatError),
 }
 
 impl std::fmt::Display for ParseAttributeError {

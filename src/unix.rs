@@ -2,70 +2,159 @@ pub mod names;
 mod udev_helpers;
 pub mod vhci;
 pub mod vhci2 {
+    #[cfg(test)]
+    mod tests {
+        use crate::vhci::VhciDriver;
+
+        use super::*;
+
+        #[test]
+        fn driver_opens() {
+            let _driver = UnixDriver::open().unwrap();
+        }
+    }
+
     use std::{
-        collections::{HashMap, VecDeque},
-        ffi::OsStr,
-        fmt::Write,
+        collections::HashMap,
+        ffi::{c_char, OsStr},
+        io::Write,
+        net::TcpStream,
         num::NonZeroUsize,
+        os::{fd::AsRawFd, unix::ffi::OsStrExt},
+        str::FromStr,
     };
 
     use crate::{
-        util::{beef::Beef, buffer::Buffer, get_token},
+        util::{beef::Beef, buffer::Buffer, parse_token},
         vhci::{HubSpeed, ImportedDeviceInner},
-        DeviceStatus,
+        DeviceSpeed, DeviceStatus,
     };
 
-    use super::udev_helpers::{ParseAttributeError, UdevAttribute, UdevHelper};
+    use super::{
+        udev_helpers::{TryFromDeviceError, UdevHelper},
+        UdevError,
+    };
 
     static BUS_TYPE: &str = "platform";
     static DEVICE_NAME: &str = "vhci_hcd.0";
+    const SYSFS_PATH_MAX: usize = 255;
 
     enum MaybeIdev {
-        Some(ImportedDevice),
-        None(u16),
+        InUse(UnixImportedDevice),
+        Empty(IdevSkeleton),
     }
 
-    impl TryFrom<UdevAttribute<'_, '_>> for MaybeIdev {
-        type Error = ParseAttributeError;
+    impl FromStr for MaybeIdev {
+        type Err = TryFromDeviceError;
 
-        fn try_from(value: UdevAttribute<'_, '_>) -> Result<Self, Self::Error> {
-            let UdevAttribute { udev, attr, data } = value;
-            let mut tokens = data.splitn(7, ' ');
-            let hub: HubSpeed = get_token(&mut tokens);
-            let port: u16 = get_token(&mut tokens);
-            let status: DeviceStatus = get_token(&mut tokens);
-            let _speed: u32 = get_token(&mut tokens);
-            let devid: u32 = get_token(&mut tokens);
-            let _sockfd: u32 = get_token(&mut tokens);
-            let busid: Buffer<{ crate::BUS_ID_SIZE }, i8> =
-                OsStr::new(tokens.next().unwrap().trim()).try_into()?;
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let mut tokens = s.split_whitespace();
+            let hub: HubSpeed = parse_token(&mut tokens);
+            let port: u16 = parse_token(&mut tokens);
+            let status: DeviceStatus = parse_token(&mut tokens);
+            let _speed: u32 = parse_token(&mut tokens);
+            let devid: u32 = parse_token(&mut tokens);
+            let _sockfd: u32 = parse_token(&mut tokens);
+            let busid = tokens.next().unwrap().trim();
             match status {
                 // This port is unused or not ready yet
                 DeviceStatus::PortAvailable | DeviceStatus::PortInitializing => {
-                    Ok(MaybeIdev::None(port))
+                    Ok(MaybeIdev::Empty(IdevSkeleton {
+                        port,
+                        hub_speed: hub,
+                        status,
+                    }))
                 }
-                _ => todo!(),
+                _ => {
+                    let sudev =
+                        udev::Device::from_subsystem_sysname("usb".to_owned(), busid.to_owned())?;
+                    let usb_dev = crate::UsbDevice::try_from(sudev)?;
+                    let idev = UnixImportedDevice {
+                        inner: ImportedDeviceInner {
+                            hub,
+                            port,
+                            status,
+                            vendor: usb_dev.id_vendor,
+                            product: usb_dev.id_product,
+                            devid,
+                            udev: usb_dev,
+                        },
+                    };
+                    debug_assert_eq!(idev.inner.usb_dev().busnum, idev.inner.dev_id() >> 16);
+                    debug_assert_eq!(
+                        idev.inner.usb_dev().devnum,
+                        idev.inner.dev_id() & 0x0000ffff
+                    );
+                    Ok(MaybeIdev::InUse(idev))
+                }
             }
         }
     }
 
     #[derive(Debug)]
-    pub struct ImportedDevice {
+    pub struct UnixImportedDevice {
         inner: ImportedDeviceInner,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct IdevSkeleton {
+        port: u16,
+        hub_speed: HubSpeed,
+        status: DeviceStatus,
+    }
+
     #[derive(Debug)]
-    pub struct ImportedDevices {
-        active: HashMap<u16, ImportedDevice>,
-        available: VecDeque<u16>,
+    enum ActivateError {
+        PortNotAvailable,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct ImportedDevices {
+        active: HashMap<u16, UnixImportedDevice>,
+        available: HashMap<u16, IdevSkeleton>,
     }
 
     impl ImportedDevices {
-        pub fn new() -> Self {
+        fn new() -> Self {
             Self {
                 active: HashMap::new(),
-                available: VecDeque::new(),
+                available: HashMap::new(),
             }
+        }
+
+        fn next_available(&self, speed: DeviceSpeed) -> Option<u16> {
+            speed.try_into().ok().and_then(|hub_speed| {
+                self.available()
+                    .values()
+                    .find(|x| x.hub_speed == hub_speed && x.status == DeviceStatus::PortAvailable)
+                    .map(|x| x.port)
+            })
+        }
+
+        fn activate<F>(&mut self, port: u16, init: F) -> Result<(), ActivateError>
+        where
+            F: FnOnce(IdevSkeleton) -> UnixImportedDevice,
+        {
+            let idev = self
+                .available_mut()
+                .remove(&port)
+                .ok_or(ActivateError::PortNotAvailable)
+                .map(init)?;
+            self.active_mut().insert(idev.inner.port(), idev);
+
+            Ok(())
+        }
+
+        fn active_mut(&mut self) -> &mut HashMap<u16, UnixImportedDevice> {
+            &mut self.active
+        }
+
+        fn available_mut(&mut self) -> &mut HashMap<u16, IdevSkeleton> {
+            &mut self.available
+        }
+
+        fn available(&self) -> &HashMap<u16, IdevSkeleton> {
+            &self.available
         }
     }
 
@@ -74,13 +163,70 @@ pub mod vhci2 {
             let mut imported_devices = ImportedDevices::new();
             for item in iter {
                 match item {
-                    MaybeIdev::Some(idev) => {
-                        imported_devices.active.insert(idev.inner.port(), idev);
+                    MaybeIdev::InUse(idev) => {
+                        imported_devices
+                            .active_mut()
+                            .insert(idev.inner.port(), idev);
                     }
-                    MaybeIdev::None(port) => imported_devices.available.push_front(port),
+                    MaybeIdev::Empty(skel) => {
+                        imported_devices.available_mut().insert(skel.port, skel);
+                    }
                 }
             }
             imported_devices
+        }
+    }
+
+    struct InitData<'a> {
+        hc_device: &'a udev::Device,
+        num_controllers: NonZeroUsize,
+        num_ports: NonZeroUsize,
+    }
+
+    impl TryFrom<InitData<'_>> for ImportedDevices {
+        type Error = UdevError;
+
+        fn try_from(init: InitData<'_>) -> Result<Self, Self::Error> {
+            let mut attr_buf = Buffer::<20, c_char>::new();
+            let mut idevs = Vec::with_capacity(init.num_ports.get());
+
+            write!(attr_buf.as_mut_u8_bytes(), "status").unwrap();
+
+            for i in 0..init.num_controllers.get() {
+                if i > 0 {
+                    attr_buf.as_mut_u8_bytes().fill(0);
+                    write!(attr_buf.as_mut_u8_bytes(), "status.{i}").unwrap();
+                }
+
+                let status = init.hc_device.sysattr(Beef::Borrowed(
+                    attr_buf.to_str().unwrap().trim().trim_matches(char::from(0)),
+                ))?;
+                let mut lines = status.lines();
+                lines.next();
+                for line in lines {
+                    idevs.push(line.parse().map_err(Into::<UdevError>::into)?);
+                }
+            }
+            Ok(idevs.into_iter().collect())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct UsbId<'a> {
+        inner: crate::vhci::UsbIdInner<'a>,
+        dev_id: u32,
+        speed: crate::DeviceSpeed,
+    }
+
+    impl crate::UsbDevice {
+        pub fn usb_id(&self) -> UsbId<'_> {
+            UsbId {
+                inner: crate::vhci::UsbIdInner {
+                    bus_id: self.bus_id(),
+                },
+                dev_id: self.dev_id(),
+                speed: self.speed(),
+            }
         }
     }
 
@@ -97,42 +243,20 @@ pub mod vhci2 {
 
     impl DriverInner {
         fn try_open() -> crate::vhci::Result<Self> {
-            let context = udev::Udev::new()?;
-            let hc_device = udev::Device::from_subsystem_sysname_with_context(
-                context.clone(),
-                BUS_TYPE.into(),
-                DEVICE_NAME.into(),
-            )?;
+            let hc_device =
+                udev::Device::from_subsystem_sysname(BUS_TYPE.into(), DEVICE_NAME.into())?;
             let num_ports: NonZeroUsize = hc_device.parse_sysattr(Beef::Static("nports"))?;
             let num_controllers = num_controllers(&hc_device)?;
-
-            let mut attr_buf = String::new();
-            let mut idevs = Vec::with_capacity(num_ports.get());
-
-            write!(&mut attr_buf, "status").unwrap();
-
-            for i in 0..num_controllers.get() {
-                if i > 0 {
-                    attr_buf.clear();
-                    write!(&mut attr_buf, "status.{i}").unwrap();
-                }
-
-                let status = hc_device.sysattr(Beef::Borrowed(&attr_buf))?;
-                let mut lines = status.lines();
-                lines.next();
-                for line in lines {
-                    let attr = UdevAttribute {
-                        udev: &hc_device,
-                        attr: Beef::Borrowed(&attr_buf),
-                        data: line,
-                    };
-                    idevs.push(MaybeIdev::try_from(attr)?);
-                }
+            let imported_devices = InitData {
+                hc_device: &hc_device,
+                num_controllers,
+                num_ports,
             }
+            .try_into()?;
 
             Ok(Self {
                 hc_device,
-                imported_devices: idevs.into_iter().collect(),
+                imported_devices,
                 num_controllers,
                 num_ports,
             })
@@ -142,8 +266,95 @@ pub mod vhci2 {
             &self.hc_device
         }
 
-        fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ ImportedDevice> + '_ {
+        fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ UnixImportedDevice> + '_ {
             self.imported_devices.active.values()
+        }
+
+        const fn num_controllers(&self) -> NonZeroUsize {
+            self.num_controllers
+        }
+
+        const fn num_ports(&self) -> NonZeroUsize {
+            self.num_ports
+        }
+
+        fn refresh_imported_devices(&mut self) -> Result<(), crate::vhci::Error> {
+            self.imported_devices = InitData {
+                hc_device: self.udev(),
+                num_controllers: self.num_controllers(),
+                num_ports: self.num_ports(),
+            }
+            .try_into()?;
+            Ok(())
+        }
+
+        fn attach(&mut self, socket: TcpStream, usb_id: UsbId) -> crate::vhci::Result<u16> {
+            use crate::vhci::error::*;
+            let port = match self.imported_devices.next_available(usb_id.speed) {
+                Some(port) => port,
+                None => {
+                    return Err(Error::AttachFailed(AttachError {
+                        socket,
+                        kind: AttachErrorKind::OutOfPorts,
+                    }))
+                }
+            };
+            let mut path_buf = Buffer::<SYSFS_PATH_MAX, c_char>::new();
+            let path = self.hc_device.syspath();
+            write!(path_buf.as_mut_u8_bytes(), "{:?}/attach", path).unwrap();
+            let mut file = match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(OsStr::from_bytes(path_buf.as_u8_bytes()))
+            {
+                Ok(file) => file,
+                Err(e) => {
+                    return Err(Error::AttachFailed(AttachError {
+                        socket,
+                        kind: AttachErrorKind::SysFs(e),
+                    }))
+                }
+            };
+            let mut buf = Buffer::<200, c_char>::new();
+
+            write!(
+                buf.as_mut_u8_bytes(),
+                "{} {} {} {}",
+                port,
+                socket.as_raw_fd(),
+                usb_id.dev_id,
+                usb_id.speed as u32
+            )
+            .unwrap();
+            if let Err(e) = file.write_all(buf.as_u8_bytes()) {
+                return Err(Error::AttachFailed(AttachError {
+                    socket,
+                    kind: AttachErrorKind::SysFs(e),
+                }));
+            }
+
+            self.imported_devices
+                .activate(port, |_| {
+                    let udev = udev::Device::from_subsystem_sysname(
+                        "usb".to_owned(),
+                        usb_id.inner.bus_id().to_owned(),
+                    )
+                    .expect("Creating repr of device already attached");
+                    let usb_dev: crate::UsbDevice = udev.try_into().unwrap();
+                    UnixImportedDevice {
+                        inner: ImportedDeviceInner {
+                            hub: usb_id.speed.try_into().unwrap(),
+                            port,
+                            status: DeviceStatus::PortInUse,
+                            vendor: usb_dev.id_vendor,
+                            product: usb_dev.id_product,
+                            devid: usb_id.dev_id,
+                            udev: usb_dev,
+                        },
+                    }
+                })
+                .expect("Port should've been open");
+            Ok(port)
         }
     }
 
@@ -154,25 +365,22 @@ pub mod vhci2 {
             })
         }
 
-        fn detach(&self, port: u16) -> crate::vhci::Result<()> {
+        fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
             todo!()
         }
 
-        fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ ImportedDevice> + '_ {
+        fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ UnixImportedDevice> + '_ {
             self.inner.imported_devices()
         }
 
-        fn attach(&self, socket: std::net::SocketAddr, bus_id: &str) -> crate::vhci::Result<u16> {
-            todo!()
+        fn attach(&mut self, socket: TcpStream, usb_id: UsbId) -> crate::vhci::Result<u16> {
+            self.inner.attach(socket, usb_id)
         }
     }
 
     fn num_controllers(hc_device: &udev::Device) -> crate::vhci::Result<NonZeroUsize> {
-        use super::UdevError;
         use crate::vhci::Error;
-
         let platform = hc_device.parent().ok_or(Error::Udev(UdevError::NoParent))?;
-
         let count: NonZeroUsize = platform
             .syspath()
             .read_dir()?
@@ -188,7 +396,6 @@ pub mod vhci2 {
             .count()
             .try_into()
             .map_err(|_| Error::NoFreeControllers)?;
-
         Ok(count)
     }
 
@@ -335,7 +542,11 @@ impl TryFrom<udev::Device> for crate::UsbDevice {
                 .ok_or(ParseAttributeError::NoAttribute(Cow::Borrowed("devnum")))?,
         )
         .unwrap();
-        let speed: u32 = udev.parse_sysattr(Beef::Static("speed"))?;
+        let speed = udev
+            .sysattr(Beef::Static("speed"))?
+            .parse::<u32>()?
+            .try_into()
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
         let bcd_device: u16 = udev.parse_sysattr(Beef::Static("bcdDevice"))?;
         let b_device_class: u8 = udev.parse_sysattr(Beef::Static("bDeviceClass"))?;
         let b_device_subclass: u8 = udev.parse_sysattr(Beef::Static("bDeviceSubClass"))?;

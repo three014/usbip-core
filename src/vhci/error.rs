@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{io, net::SocketAddr};
+use std::{io, net::{SocketAddr, TcpStream}};
 
 #[derive(Debug)]
 pub enum Error {
@@ -22,20 +22,33 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[derive(Debug)]
+pub enum AttachErrorKind {
+    OutOfPorts,
+    #[cfg(unix)]
+    SysFs(io::Error)
+}
+
+impl fmt::Display for AttachErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+
+#[derive(Debug)]
 pub struct AttachError {
-    socket: SocketAddr,
-    errno: io::Error
+    pub(crate) socket: TcpStream,
+    pub(crate) kind: AttachErrorKind
 }
 
 impl AttachError {
-    pub fn into_parts(self) -> (SocketAddr, io::Error) {
-        (self.socket, self.errno)
+    pub fn into_parts(self) -> (TcpStream, AttachErrorKind) {
+        (self.socket, self.kind)
     }
 }
 
 impl fmt::Display for AttachError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} (socket: {})", self.errno, self.socket)
+        write!(f, "{} (socket: {})", self.kind, self.socket.peer_addr().unwrap())
     }
 }
 
