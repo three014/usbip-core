@@ -1,29 +1,30 @@
 use core::fmt;
 use std::{
-    ffi::{OsStr, c_char},
-    num::{ParseIntError, TryFromIntError},
+    ffi::{c_char, OsStr},
+    num::ParseIntError,
     path::Path,
     str::FromStr,
 };
 
+use containers::buffer::Buffer;
 use serde::{Deserialize, Serialize};
-use util::buffer::Buffer;
 
 #[cfg(unix)]
 mod unix;
 
 pub mod names;
-
-mod util {
-    use std::str::FromStr;
-
-    pub mod __padding;
+pub mod containers {
     pub mod beef;
     pub mod buffer;
     pub mod singleton;
+}
+
+mod util {
+    pub mod __padding;
     pub mod __private {
         pub trait Sealed {}
     }
+    use std::str::FromStr;
 
     fn cast_u8_to_i8_slice(a: &[u8]) -> &[i8] {
         unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<i8>(), a.len()) }
@@ -245,7 +246,7 @@ impl FromStr for DeviceSpeed {
             "unknown" => Ok(Self::Unknown),
             "1.5" => Ok(Self::Low),
             "53.3-480" => Ok(Self::Wireless),
-            num => Ok(Self::from(num.parse::<u32>()?))
+            num => Ok(Self::from(num.parse::<u32>()?)),
         }
     }
 }

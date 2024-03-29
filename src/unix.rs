@@ -45,13 +45,9 @@ pub mod vhci2 {
     };
 
     use crate::{
-        util::{
-            beef::Beef,
-            buffer::{self, Buffer},
-            parse_token,
-        },
+        util::parse_token,
         vhci::{HubSpeed, ImportedDeviceInner},
-        DeviceSpeed, DeviceStatus, BUS_ID_SIZE,
+        DeviceSpeed, DeviceStatus, BUS_ID_SIZE, containers::{buffer::{self, Buffer}, beef::Beef},
     };
 
     use super::{
@@ -576,13 +572,7 @@ pub mod vhci2 {
     impl crate::util::__private::Sealed for UnixDriver {}
 }
 
-use crate::{
-    unix::udev_helpers::UdevHelper,
-    util::{
-        beef::Beef,
-        buffer::{Buffer, FormatError},
-    },
-};
+use crate::{unix::udev_helpers::UdevHelper, containers::{buffer::{FormatError, Buffer}, beef::Beef}};
 use std::{
     borrow::Cow,
     ffi::{c_char, OsStr},
