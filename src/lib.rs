@@ -1,11 +1,135 @@
 #[cfg(unix)]
 mod unix;
+#[cfg(windows)]
+mod windows {
+    pub mod vhci {
+        use std::{ffi::OsString, fs::File, os::windows::fs::OpenOptionsExt, path::PathBuf};
+
+        use windows::{
+            core::{GUID, PCSTR, PCWSTR},
+            Win32::{
+                Devices::DeviceAndDriverInstallation::{
+                    CM_Get_Device_Interface_ListA, CM_Get_Device_Interface_ListW, CM_Get_Device_Interface_List_SizeA, CM_MapCrToWin32Err, CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CR_BUFFER_SMALL, CR_SUCCESS
+                },
+                Foundation::{SetLastError, ERROR_INVALID_PARAMETER, WIN32_ERROR},
+                Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE},
+            },
+        };
+
+        use crate::vhci::{ImportedDeviceInner, UsbIdInner, VhciDriver};
+
+        pub static STATE_PATH: &str = "";
+        const GUID_DEVINTERFACE_USB_HOST_CONTROLLER: GUID = GUID::from_values(
+            0xB4030C06,
+            0xDC5F,
+            0x4FCC,
+            [0x87, 0xEB, 0xE5, 0x51, 0x5A, 0x09, 0x35, 0xC0],
+        );
+
+        pub struct WindowsImportedDevice {
+            inner: ImportedDeviceInner,
+        }
+
+        pub struct UsbId<'a> {
+            inner: UsbIdInner<'a>,
+        }
+
+        struct DriverInner {
+            handle: File,
+        }
+
+        impl DriverInner {
+            fn try_open() -> crate::vhci::Result<Self> {
+                let file = File::options()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .attributes((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+                    .open(get_path()?)?;
+
+                todo!()
+            }
+        }
+
+        fn get_path() -> windows::core::Result<PathBuf> {
+            let guid = GUID_DEVINTERFACE_USB_HOST_CONTROLLER;
+            loop {
+                let mut cch = 0;
+                let ret = unsafe {
+                    CM_Get_Device_Interface_List_SizeA(
+                        std::ptr::addr_of_mut!(cch),
+                        std::ptr::addr_of!(guid),
+                        PCSTR::null(),
+                        CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+                    )
+                };
+                if ret != CR_SUCCESS {
+                    let code = unsafe { CM_MapCrToWin32Err(ret, ERROR_INVALID_PARAMETER.0) };
+                    return Err(windows::core::Error::from(WIN32_ERROR(code)));
+                }
+
+                let mut s = Vec::<u16>::with_capacity(cch as usize);
+                let ret = unsafe {
+                    CM_Get_Device_Interface_ListW(
+                        std::ptr::addr_of!(guid),
+                        PCWSTR::null(),
+                        &mut s,
+                        CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+                    )
+                };
+                match ret {
+                    CR_SUCCESS => {
+                        let s = s.strip_suffix(&[0u16]);
+                    },
+                    CR_BUFFER_SMALL => continue,
+                    err => {}
+                }
+            }
+            todo!()
+        }
+
+        pub struct WindowsVhciDriver {
+            inner: DriverInner,
+            temp: [WindowsImportedDevice; 4],
+        }
+
+        impl VhciDriver for WindowsVhciDriver {
+            fn open() -> crate::vhci::Result<Self> {
+                todo!()
+            }
+
+            fn attach(
+                &mut self,
+                socket: std::net::TcpStream,
+                usb_id: UsbId,
+            ) -> crate::vhci::Result<u16> {
+                todo!()
+            }
+
+            fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
+                todo!()
+            }
+
+            fn imported_devices(
+                &self,
+            ) -> impl ExactSizeIterator<Item = &'_ WindowsImportedDevice> + '_ {
+                self.temp.iter()
+            }
+        }
+
+        impl crate::util::__private::Sealed for WindowsVhciDriver {}
+    }
+
+    pub static USB_IDS: &str = "";
+}
 mod platform {
     #[cfg(unix)]
     pub use crate::unix::USB_IDS;
+    #[cfg(windows)]
+    pub use crate::windows::USB_IDS;
 }
-pub mod vhci;
 pub mod names;
+pub mod vhci;
 pub mod containers {
     pub mod beef;
     pub mod buffer;
@@ -238,4 +362,3 @@ impl From<u32> for DeviceSpeed {
         }
     }
 }
-

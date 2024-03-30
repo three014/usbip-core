@@ -4,6 +4,11 @@ mod platform {
     pub use crate::unix::vhci2::{
         UnixDriver as Driver, UnixImportedDevice as ImportedDevice, UsbId, STATE_PATH,
     };
+
+    #[cfg(windows)]
+    pub use crate::windows::vhci::{
+        UsbId, WindowsImportedDevice as ImportedDevice, WindowsVhciDriver as Driver, STATE_PATH
+    };
 }
 
 use crate::DeviceStatus;
