@@ -55,7 +55,7 @@ pub mod vhci2 {
         UdevError,
     };
 
-    static STATE_PATH: &str = "/var/run/vhci_hcd";
+    pub static STATE_PATH: &str = "/var/run/vhci_hcd";
     static BUS_TYPE: &str = "platform";
     static DEVICE_NAME: &str = "vhci_hcd.0";
     const SYSFS_PATH_MAX: usize = 255;
@@ -197,12 +197,22 @@ pub mod vhci2 {
     }
 
     impl UnixImportedDevice {
-        pub fn display<'a: 'c, 'b: 'c, 'c>(
+        pub const fn display<'a: 'c, 'b: 'c, 'c>(
             &'a self,
             names: &'b crate::names::Names,
         ) -> impl fmt::Display + 'c {
             UnixIdevDisplay { idev: self, names }
         }
+
+        pub const fn status(&self) -> DeviceStatus {
+            self.inner.status()
+        }
+
+        pub const fn port(&self) -> u16 {
+            self.inner.port()
+        }
+
+        
     }
 
     struct UnixIdevDisplay<'a, 'b> {
@@ -404,6 +414,12 @@ pub mod vhci2 {
         inner: DriverInner,
     }
 
+    impl UnixDriver {
+        pub fn refresh_imported_devices(&mut self) -> crate::vhci::Result<()> {
+            self.inner.refresh_imported_devices()
+        }
+    }
+
     struct DriverInner {
         hc_device: udev::Device,
         imported_devices: ImportedDevices,
@@ -554,8 +570,8 @@ pub mod vhci2 {
         let count: NonZeroUsize = platform
             .syspath()
             .read_dir()?
-            .filter(|e| {
-                e.as_ref().is_ok_and(|entry| {
+            .filter(|result| {
+                result.as_ref().is_ok_and(|entry| {
                     entry
                         .file_name()
                         .as_os_str()
@@ -572,19 +588,19 @@ pub mod vhci2 {
     impl crate::util::__private::Sealed for UnixDriver {}
 }
 
-use crate::{unix::udev_helpers::UdevHelper, containers::{buffer::{FormatError, Buffer}, beef::Beef}};
+use crate::{unix::udev_helpers::UdevHelper, containers::{buffer::{FormatError, Buffer}, beef::Beef}, DEV_PATH_MAX, BUS_ID_SIZE};
 use std::{
     borrow::Cow,
     ffi::{c_char, OsStr},
     os::unix::ffi::OsStrExt,
     path::Path,
 };
-pub use udev;
+use udev;
 pub use udev_helpers::Error as UdevError;
 
 use udev_helpers::ParseAttributeError;
 
-pub const USB_IDS: &str = "/usr/share/hwdata/usb.ids";
+pub static USB_IDS: &str = "/usr/share/hwdata/usb.ids";
 
 impl<const N: usize> TryFrom<&OsStr> for Buffer<N, c_char> {
     type Error = FormatError;
@@ -606,8 +622,8 @@ impl TryFrom<udev::Device> for crate::UsbDevice {
     type Error = ParseAttributeError;
 
     fn try_from(udev: udev::Device) -> Result<Self, Self::Error> {
-        let path: Buffer<{ crate::DEV_PATH_MAX }, i8> = udev.syspath().try_into()?;
-        let busid: Buffer<{ crate::BUS_ID_SIZE }, i8> = udev.sysname().try_into()?;
+        let path: Buffer<DEV_PATH_MAX, c_char> = udev.syspath().try_into()?;
+        let busid: Buffer<BUS_ID_SIZE, c_char> = udev.sysname().try_into()?;
         let id_vendor: u16 = udev.parse_sysattr(Beef::Static("idVendor"))?;
         let id_product: u16 = udev.parse_sysattr(Beef::Static("idProduct"))?;
         let busnum: u32 = udev.parse_sysattr(Beef::Static("busnum"))?;

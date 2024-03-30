@@ -1,57 +1,17 @@
-use core::fmt;
-use std::{
-    ffi::{c_char, OsStr},
-    num::ParseIntError,
-    path::Path,
-    str::FromStr,
-};
-
-use containers::buffer::Buffer;
-use serde::{Deserialize, Serialize};
-
 #[cfg(unix)]
 mod unix;
-
+mod platform {
+    #[cfg(unix)]
+    pub use crate::unix::USB_IDS;
+}
+pub mod vhci;
 pub mod names;
 pub mod containers {
     pub mod beef;
     pub mod buffer;
     pub mod singleton;
 }
-
-mod util {
-    pub mod __padding;
-    pub mod __private {
-        pub trait Sealed {}
-    }
-    use std::str::FromStr;
-
-    fn cast_u8_to_i8_slice(a: &[u8]) -> &[i8] {
-        unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<i8>(), a.len()) }
-    }
-
-    fn cast_i8_to_u8_slice(a: &[i8]) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<u8>(), a.len()) }
-    }
-
-    pub fn parse_token<'a, 'b: 'a, T>(tokens: &'a mut impl Iterator<Item = &'b str>) -> T
-    where
-        T: FromStr,
-        T::Err: std::error::Error,
-    {
-        tokens
-            .next()
-            .expect("There should be another item in the string stream")
-            .trim()
-            .parse()
-            .expect("Token should be valid")
-    }
-
-    pub fn cast_i8_to_u8_mut_slice(a: &mut [i8]) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(a.as_mut_ptr().cast::<u8>(), a.len()) }
-    }
-}
-
+mod util;
 pub mod net {
     use core::fmt;
     use serde::{Deserialize, Serialize};
@@ -80,6 +40,19 @@ pub mod net {
         }
     }
 }
+
+use core::fmt;
+use std::{
+    ffi::{c_char, OsStr},
+    num::ParseIntError,
+    path::Path,
+    str::FromStr,
+};
+
+use containers::buffer::Buffer;
+use serde::{Deserialize, Serialize};
+
+pub use platform::USB_IDS;
 
 pub const USBIP_VERSION: usize = 0x111;
 pub const DEV_PATH_MAX: usize = 256;
@@ -164,7 +137,10 @@ pub enum ParseDeviceStatusError {
 
 impl fmt::Display for ParseDeviceStatusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        match self {
+            ParseDeviceStatusError::Invalid => write!(f, "Invalid device status"),
+            ParseDeviceStatusError::Parse(p) => write!(f, "{p}"),
+        }
     }
 }
 
@@ -263,140 +239,3 @@ impl From<u32> for DeviceSpeed {
     }
 }
 
-pub mod vhci {
-    pub(crate) mod error;
-    mod platform {
-        #[cfg(unix)]
-        pub use crate::unix::vhci2::UnixDriver as Driver;
-        #[cfg(unix)]
-        pub use crate::unix::vhci2::UnixImportedDevice as ImportedDevice;
-        #[cfg(unix)]
-        pub use crate::unix::vhci2::UsbId;
-    }
-
-    use crate::DeviceStatus;
-    use crate::UsbDevice;
-    use core::fmt;
-    use std::net::TcpStream;
-    use std::str::FromStr;
-
-    pub use error::Error;
-    pub use platform::Driver;
-    pub use platform::ImportedDevice;
-    pub use platform::UsbId;
-
-    pub type Result<T> = std::result::Result<T, Error>;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum HubSpeed {
-        High = 0,
-        Super,
-    }
-
-    impl From<HubSpeed> for crate::DeviceSpeed {
-        fn from(value: HubSpeed) -> Self {
-            match value {
-                HubSpeed::High => crate::DeviceSpeed::High,
-                HubSpeed::Super => crate::DeviceSpeed::Super,
-            }
-        }
-    }
-
-    impl TryFrom<crate::DeviceSpeed> for HubSpeed {
-        type Error = crate::TryFromDeviceSpeedError;
-
-        fn try_from(value: crate::DeviceSpeed) -> std::result::Result<Self, Self::Error> {
-            match value {
-                crate::DeviceSpeed::High => Ok(Self::High),
-                crate::DeviceSpeed::Super => Ok(Self::Super),
-                _ => Err(Self::Error::Invalid),
-            }
-        }
-    }
-
-    impl FromStr for HubSpeed {
-        type Err = ParseHubSpeedError;
-
-        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-            match s {
-                "ss" => Ok(Self::Super),
-                "hs" => Ok(Self::High),
-                "" => Err(ParseHubSpeedError::Empty),
-                _ => Err(ParseHubSpeedError::Invalid),
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    pub enum ParseHubSpeedError {
-        Empty,
-        Invalid,
-    }
-
-    impl fmt::Display for ParseHubSpeedError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            todo!()
-        }
-    }
-
-    impl std::error::Error for ParseHubSpeedError {}
-
-    #[derive(Debug)]
-    pub(crate) struct ImportedDeviceInner {
-        pub(crate) hub: HubSpeed,
-        pub(crate) port: u16,
-        pub(crate) status: DeviceStatus,
-        pub(crate) vendor: u16,
-        pub(crate) product: u16,
-        pub(crate) devid: u32,
-        pub(crate) udev: UsbDevice,
-    }
-
-    impl ImportedDeviceInner {
-        pub const fn hub(&self) -> HubSpeed {
-            self.hub
-        }
-
-        pub const fn port(&self) -> u16 {
-            self.port
-        }
-
-        pub const fn status(&self) -> DeviceStatus {
-            self.status
-        }
-
-        pub const fn vendor(&self) -> u16 {
-            self.vendor
-        }
-
-        pub const fn dev_id(&self) -> u32 {
-            self.devid
-        }
-
-        pub const fn product(&self) -> u16 {
-            self.product
-        }
-
-        pub const fn usb_dev(&self) -> &UsbDevice {
-            &self.udev
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    pub(crate) struct UsbIdInner<'a> {
-        pub(crate) bus_id: &'a str,
-    }
-
-    impl UsbIdInner<'_> {
-        pub const fn bus_id(&self) -> &str {
-            self.bus_id
-        }
-    }
-
-    pub trait VhciDriver: Sized + crate::util::__private::Sealed {
-        fn open() -> Result<Self>;
-        fn attach(&mut self, socket: TcpStream, usb_id: UsbId) -> Result<u16>;
-        fn detach(&mut self, port: u16) -> Result<()>;
-        fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ ImportedDevice> + '_;
-    }
-}
