@@ -7,7 +7,7 @@ mod platform {
 
     #[cfg(windows)]
     pub use crate::windows::vhci::{
-        UsbId, WindowsImportedDevice as ImportedDevice, WindowsVhciDriver as Driver, STATE_PATH
+        UsbId, WindowsImportedDevice as ImportedDevice, WindowsVhciDriver as Driver, STATE_PATH,
     };
 }
 

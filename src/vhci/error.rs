@@ -21,12 +21,12 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Io(i) => write!(f, "VHCI I/O: {i}"),
+            Error::Io(i) => write!(f, "VHCI I/O (is driver loaded?): {i}"),
             Error::AttachFailed(a) => write!(f, "VHCI Attach Failed: {a}"),
             #[cfg(windows)]
             Error::Windows(_) => todo!(),
             #[cfg(unix)]
-            Error::Udev(u) => write!(f, "VHCI Udev: {u}"),
+            Error::Udev(u) => write!(f, "VHCI Udev (is driver loaded?): {u}"),
             #[cfg(unix)]
             Error::NoFreeControllers => todo!(),
             #[cfg(unix)]
@@ -46,7 +46,11 @@ pub enum AttachErrorKind {
 
 impl fmt::Display for AttachErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        match self {
+            AttachErrorKind::OutOfPorts => write!(f, "Out of ports"),
+            #[cfg(unix)]
+            SysFs(i) => todo!()
+        }
     }
 }
 

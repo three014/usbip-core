@@ -2,21 +2,85 @@
 mod unix;
 #[cfg(windows)]
 mod windows {
+    use windows::Win32::{
+        Devices::DeviceAndDriverInstallation::{CM_MapCrToWin32Err, CONFIGRET},
+        Foundation::{ERROR_INVALID_PARAMETER, WIN32_ERROR},
+    };
+
     pub mod vhci {
-        use std::{ffi::OsString, fs::File, os::windows::fs::OpenOptionsExt, path::PathBuf};
+        mod utils {
+            use windows::{
+                core::{GUID, PCWSTR},
+                Win32::{
+                    Devices::DeviceAndDriverInstallation::{
+                        CM_Get_Device_Interface_ListW, CM_Get_Device_Interface_List_SizeW,
+                        CM_GET_DEVICE_INTERFACE_LIST_FLAGS, CR_BUFFER_SMALL, CR_SUCCESS,
+                    },
+                    Foundation::{ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY},
+                },
+            };
+
+            use super::Win32Error;
+
+            pub fn get_device_interface_list<P>(
+                guid: GUID,
+                pdeviceid: P,
+                flags: CM_GET_DEVICE_INTERFACE_LIST_FLAGS,
+            ) -> Result<Vec<u16>, Win32Error>
+            where
+                P: ::windows::core::IntoParam<PCWSTR> + Copy,
+            {
+                let mut v = Vec::<u16>::new();
+                loop {
+                    let mut cch = 0;
+                    let ret = unsafe {
+                        CM_Get_Device_Interface_List_SizeW(
+                            std::ptr::addr_of_mut!(cch),
+                            std::ptr::addr_of!(guid),
+                            pdeviceid,
+                            flags,
+                        )
+                    };
+                    if ret != CR_SUCCESS {
+                        break Err(Win32Error::from_cmret(ret, ERROR_INVALID_PARAMETER));
+                    }
+
+                    v.resize(cch as usize, 0);
+
+                    let ret = unsafe {
+                        CM_Get_Device_Interface_ListW(
+                            std::ptr::addr_of!(guid),
+                            pdeviceid,
+                            &mut v,
+                            flags,
+                        )
+                    };
+                    match ret {
+                        CR_BUFFER_SMALL => continue,
+                        CR_SUCCESS => break Ok(v),
+                        err => break Err(Win32Error::from_cmret(err, ERROR_NOT_ENOUGH_MEMORY)),
+                    }
+                }
+            }
+        }
+        use std::{
+            ffi::OsString,
+            fs::File,
+            os::windows::{ffi::OsStringExt, fs::OpenOptionsExt},
+            path::PathBuf,
+        };
 
         use windows::{
-            core::{GUID, PCSTR, PCWSTR},
+            core::{GUID, PCWSTR},
             Win32::{
-                Devices::DeviceAndDriverInstallation::{
-                    CM_Get_Device_Interface_ListA, CM_Get_Device_Interface_ListW, CM_Get_Device_Interface_List_SizeA, CM_MapCrToWin32Err, CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CR_BUFFER_SMALL, CR_SUCCESS
-                },
-                Foundation::{SetLastError, ERROR_INVALID_PARAMETER, WIN32_ERROR},
+                Devices::DeviceAndDriverInstallation::CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
                 Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE},
             },
         };
 
         use crate::vhci::{ImportedDeviceInner, UsbIdInner, VhciDriver};
+
+        use super::Win32Error;
 
         pub static STATE_PATH: &str = "";
         const GUID_DEVINTERFACE_USB_HOST_CONTROLLER: GUID = GUID::from_values(
@@ -47,45 +111,25 @@ mod windows {
                     .attributes((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
                     .open(get_path()?)?;
 
-                todo!()
+                Ok(Self { handle: file })
             }
         }
 
-        fn get_path() -> windows::core::Result<PathBuf> {
-            let guid = GUID_DEVINTERFACE_USB_HOST_CONTROLLER;
-            loop {
-                let mut cch = 0;
-                let ret = unsafe {
-                    CM_Get_Device_Interface_List_SizeA(
-                        std::ptr::addr_of_mut!(cch),
-                        std::ptr::addr_of!(guid),
-                        PCSTR::null(),
-                        CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
-                    )
-                };
-                if ret != CR_SUCCESS {
-                    let code = unsafe { CM_MapCrToWin32Err(ret, ERROR_INVALID_PARAMETER.0) };
-                    return Err(windows::core::Error::from(WIN32_ERROR(code)));
-                }
-
-                let mut s = Vec::<u16>::with_capacity(cch as usize);
-                let ret = unsafe {
-                    CM_Get_Device_Interface_ListW(
-                        std::ptr::addr_of!(guid),
-                        PCWSTR::null(),
-                        &mut s,
-                        CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
-                    )
-                };
-                match ret {
-                    CR_SUCCESS => {
-                        let s = s.strip_suffix(&[0u16]);
-                    },
-                    CR_BUFFER_SMALL => continue,
-                    err => {}
-                }
+        fn get_path() -> crate::vhci::Result<PathBuf> {
+            let v = utils::get_device_interface_list(
+                GUID_DEVINTERFACE_USB_HOST_CONTROLLER,
+                PCWSTR::null(),
+                CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+            )?;
+            let p = v
+                .split(|&elm| elm == 0u16)
+                .filter(|slice| !slice.is_empty())
+                .collect::<Vec<&[u16]>>();
+            if p.len() == 1 {
+                Ok(PathBuf::from(OsString::from_wide(p[0])))
+            } else {
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound).into())
             }
-            todo!()
         }
 
         pub struct WindowsVhciDriver {
@@ -95,7 +139,10 @@ mod windows {
 
         impl VhciDriver for WindowsVhciDriver {
             fn open() -> crate::vhci::Result<Self> {
-                todo!()
+                Ok(Self {
+                    inner: DriverInner::try_open()?,
+                    temp: todo!(),
+                })
             }
 
             fn attach(
@@ -117,10 +164,35 @@ mod windows {
             }
         }
 
+        impl From<Win32Error> for crate::vhci::Error {
+            fn from(value: Win32Error) -> Self {
+                Self::Windows(value.into())
+            }
+        }
+
         impl crate::util::__private::Sealed for WindowsVhciDriver {}
     }
 
     pub static USB_IDS: &str = "";
+
+    struct Win32Error(WIN32_ERROR);
+
+    impl Win32Error {
+        pub fn get(self) -> WIN32_ERROR {
+            self.0
+        }
+
+        pub fn from_cmret(cm_ret: CONFIGRET, default_err: WIN32_ERROR) -> Self {
+            let code = unsafe { CM_MapCrToWin32Err(cm_ret, default_err.0) };
+            Self(WIN32_ERROR(code))
+        }
+    }
+
+    impl From<Win32Error> for ::windows::core::Error {
+        fn from(value: Win32Error) -> Self {
+            ::windows::core::Error::from(value.get())
+        }
+    }
 }
 mod platform {
     #[cfg(unix)]
