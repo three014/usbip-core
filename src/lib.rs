@@ -113,6 +113,8 @@ mod windows {
 
                 Ok(Self { handle: file })
             }
+
+            fn imported_devices(&mut self)
         }
 
         fn get_path() -> crate::vhci::Result<PathBuf> {
@@ -121,12 +123,15 @@ mod windows {
                 PCWSTR::null(),
                 CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
             )?;
-            let p = v
-                .split(|&elm| elm == 0u16)
-                .filter(|slice| !slice.is_empty())
-                .collect::<Vec<&[u16]>>();
-            if p.len() == 1 {
-                Ok(PathBuf::from(OsString::from_wide(p[0])))
+            let mut p = v.split(|&elm| elm == 0).filter(|slice| !slice.is_empty());
+            if let Some(path) = p.next() {
+                if p.next().is_some() {
+                    // We add 2 because of the first slice and
+                    // this second slice we just found.
+                    Err(crate::vhci::Error::MultipleDevInterfaces(2 + p.count()))
+                } else {
+                    Ok(PathBuf::from(OsString::from_wide(path)))
+                }
             } else {
                 Err(std::io::Error::from(std::io::ErrorKind::NotFound).into())
             }
@@ -134,14 +139,12 @@ mod windows {
 
         pub struct WindowsVhciDriver {
             inner: DriverInner,
-            temp: [WindowsImportedDevice; 4],
         }
 
         impl VhciDriver for WindowsVhciDriver {
             fn open() -> crate::vhci::Result<Self> {
                 Ok(Self {
                     inner: DriverInner::try_open()?,
-                    temp: todo!(),
                 })
             }
 
@@ -160,7 +163,6 @@ mod windows {
             fn imported_devices(
                 &self,
             ) -> impl ExactSizeIterator<Item = &'_ WindowsImportedDevice> + '_ {
-                self.temp.iter()
             }
         }
 

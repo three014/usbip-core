@@ -10,6 +10,8 @@ pub enum Error {
     AttachFailed(AttachError),
     #[cfg(windows)]
     Windows(::windows::core::Error),
+    #[cfg(windows)]
+    MultipleDevInterfaces(usize),
     #[cfg(unix)]
     Udev(crate::unix::UdevError),
     #[cfg(unix)]
@@ -25,6 +27,8 @@ impl fmt::Display for Error {
             Error::AttachFailed(a) => write!(f, "VHCI Attach Failed: {a}"),
             #[cfg(windows)]
             Error::Windows(_) => todo!(),
+            #[cfg(windows)]
+            Error::MultipleDevInterfaces(num) => write!(f, "Multiple instances of VHCI device interface found ({num})"),
             #[cfg(unix)]
             Error::Udev(u) => write!(f, "VHCI Udev (is driver loaded?): {u}"),
             #[cfg(unix)]
