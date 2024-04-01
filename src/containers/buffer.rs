@@ -36,7 +36,7 @@ impl<const N: usize> Buffer<N, c_char> {
 
     pub fn to_str(&self) -> Result<&str, Utf8Error> {
         let slice = self.as_u8_bytes();
-        std::str::from_utf8(slice)
+        std::str::from_utf8(slice).map(|s| s.trim().trim_matches(char::from(0)))
     }
 
     pub fn to_mut_str(&mut self) -> Result<&mut str, Utf8Error> {

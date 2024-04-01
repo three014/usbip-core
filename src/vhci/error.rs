@@ -53,7 +53,7 @@ impl fmt::Display for AttachErrorKind {
         match self {
             AttachErrorKind::OutOfPorts => write!(f, "Out of ports"),
             #[cfg(unix)]
-            SysFs(i) => todo!()
+            AttachErrorKind::SysFs(i) => todo!()
         }
     }
 }
@@ -86,13 +86,6 @@ impl std::error::Error for AttachError {}
 impl From<io::Error> for Error {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
-    }
-}
-
-#[cfg(unix)]
-impl From<crate::unix::UdevError> for Error {
-    fn from(value: crate::unix::UdevError) -> Self {
-        Self::Udev(value)
     }
 }
 

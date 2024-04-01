@@ -2,7 +2,7 @@ pub(crate) mod error;
 mod platform {
     #[cfg(unix)]
     pub use crate::unix::vhci2::{
-        UnixDriver as Driver, UnixImportedDevice as ImportedDevice, UsbId, STATE_PATH,
+        PortRecord, UnixDriver as Driver, UnixImportedDevice as ImportedDevice, UsbId, STATE_PATH,
     };
 
     #[cfg(windows)]
@@ -11,14 +11,76 @@ mod platform {
     };
 }
 
-use crate::DeviceStatus;
-use crate::UsbDevice;
+pub mod inner {
+    use std::{net::SocketAddr, ffi::c_char};
+
+    use crate::{containers::buffer::Buffer, BUS_ID_SIZE, DeviceStatus};
+
+    #[derive(Debug)]
+    pub struct ImportedDevice {
+        pub(crate) port: u16,
+        pub(crate) status: DeviceStatus,
+        pub(crate) vendor: u16,
+        pub(crate) product: u16,
+        pub(crate) devid: u32,
+    }
+
+    impl ImportedDevice {
+        pub const fn port(&self) -> u16 {
+            self.port
+        }
+
+        pub const fn status(&self) -> DeviceStatus {
+            self.status
+        }
+
+        pub const fn vendor(&self) -> u16 {
+            self.vendor
+        }
+
+        pub const fn dev_id(&self) -> u32 {
+            self.devid
+        }
+
+        pub const fn product(&self) -> u16 {
+            self.product
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct PortRecord {
+        pub(crate) host: SocketAddr,
+        pub(crate) busid: Buffer<BUS_ID_SIZE, c_char>,
+    }
+
+    impl PortRecord {
+        pub const fn host(&self) -> &SocketAddr {
+            &self.host
+        }
+
+        pub fn bus_id(&self) -> &str {
+            self.busid.to_str().unwrap()
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct UsbId<'a> {
+        pub(crate) bus_id: &'a str,
+    }
+
+    impl UsbId<'_> {
+        pub const fn bus_id(&self) -> &str {
+            self.bus_id
+        }
+    }
+}
+
 use core::fmt;
 use std::net::TcpStream;
 use std::str::FromStr;
 
 pub use error::Error;
-pub use platform::{Driver, ImportedDevice, UsbId, STATE_PATH};
+pub use platform::{Driver, ImportedDevice, PortRecord, UsbId, STATE_PATH};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -78,58 +140,6 @@ impl fmt::Display for ParseHubSpeedError {
 }
 
 impl std::error::Error for ParseHubSpeedError {}
-
-#[derive(Debug)]
-pub(crate) struct ImportedDeviceInner {
-    pub(crate) hub: HubSpeed,
-    pub(crate) port: u16,
-    pub(crate) status: DeviceStatus,
-    pub(crate) vendor: u16,
-    pub(crate) product: u16,
-    pub(crate) devid: u32,
-    pub(crate) udev: UsbDevice,
-}
-
-impl ImportedDeviceInner {
-    pub const fn hub(&self) -> HubSpeed {
-        self.hub
-    }
-
-    pub const fn port(&self) -> u16 {
-        self.port
-    }
-
-    pub const fn status(&self) -> DeviceStatus {
-        self.status
-    }
-
-    pub const fn vendor(&self) -> u16 {
-        self.vendor
-    }
-
-    pub const fn dev_id(&self) -> u32 {
-        self.devid
-    }
-
-    pub const fn product(&self) -> u16 {
-        self.product
-    }
-
-    pub const fn usb_dev(&self) -> &UsbDevice {
-        &self.udev
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct UsbIdInner<'a> {
-    pub(crate) bus_id: &'a str,
-}
-
-impl UsbIdInner<'_> {
-    pub const fn bus_id(&self) -> &str {
-        self.bus_id
-    }
-}
 
 pub trait VhciDriver: Sized + crate::util::__private::Sealed {
     fn open() -> Result<Self>;

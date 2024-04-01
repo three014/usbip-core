@@ -239,6 +239,7 @@ pub mod net {
 use core::fmt;
 use std::{
     ffi::{c_char, OsStr},
+    net::SocketAddr,
     num::ParseIntError,
     path::Path,
     str::FromStr,
@@ -274,12 +275,12 @@ pub struct UsbDevice {
 
 impl UsbDevice {
     pub fn path(&self) -> &Path {
-        let s = self.path.to_str().unwrap().trim();
+        let s = self.path.to_str().unwrap();
         Path::new(OsStr::new(s))
     }
 
     pub fn bus_id(&self) -> &str {
-        self.busid.to_str().unwrap().trim()
+        self.busid.to_str().unwrap()
     }
 
     pub const fn dev_id(&self) -> u32 {
