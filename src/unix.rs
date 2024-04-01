@@ -418,6 +418,10 @@ pub mod vhci2 {
         pub fn refresh_imported_devices(&mut self) -> crate::vhci::Result<()> {
             self.inner.refresh_imported_devices()
         }
+        
+        pub fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ UnixImportedDevice> + '_ {
+            self.inner.imported_devices()
+        }
     }
 
     struct DriverInner {
@@ -553,11 +557,7 @@ pub mod vhci2 {
 
         fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
             todo!()
-        }
-
-        fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ UnixImportedDevice> + '_ {
-            self.inner.imported_devices()
-        }
+        } 
 
         fn attach(&mut self, socket: TcpStream, usb_id: UsbId) -> crate::vhci::Result<u16> {
             self.inner.attach(socket, usb_id)

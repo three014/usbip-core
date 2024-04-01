@@ -135,5 +135,4 @@ pub trait VhciDriver: Sized + crate::util::__private::Sealed {
     fn open() -> Result<Self>;
     fn attach(&mut self, socket: TcpStream, usb_id: UsbId) -> Result<u16>;
     fn detach(&mut self, port: u16) -> Result<()>;
-    fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ ImportedDevice> + '_;
 }

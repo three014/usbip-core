@@ -114,7 +114,9 @@ mod windows {
                 Ok(Self { handle: file })
             }
 
-            fn imported_devices(&mut self)
+            fn imported_devices(&self) -> Box<[WindowsImportedDevice]> {
+                todo!()
+            }
         }
 
         fn get_path() -> crate::vhci::Result<PathBuf> {
@@ -158,11 +160,6 @@ mod windows {
 
             fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
                 todo!()
-            }
-
-            fn imported_devices(
-                &self,
-            ) -> impl ExactSizeIterator<Item = &'_ WindowsImportedDevice> + '_ {
             }
         }
 
