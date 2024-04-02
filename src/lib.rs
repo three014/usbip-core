@@ -4,11 +4,88 @@ mod unix;
 mod windows {
     use windows::Win32::{
         Devices::DeviceAndDriverInstallation::{CM_MapCrToWin32Err, CONFIGRET},
-        Foundation::{ERROR_INVALID_PARAMETER, WIN32_ERROR},
+        Foundation::WIN32_ERROR,
     };
 
     pub mod vhci {
         mod utils {
+            pub mod ioctl {
+                use windows::Win32::Storage::FileSystem::{
+                    FILE_ACCESS_RIGHTS, FILE_READ_DATA, FILE_WRITE_DATA,
+                };
+
+                #[repr(u32)]
+                enum DeviceType {
+                    Unknown = ::windows::Win32::System::Ioctl::FILE_DEVICE_UNKNOWN,
+                }
+
+                #[repr(u32)]
+                enum Method {
+                    Buffered = ::windows::Win32::System::Ioctl::METHOD_BUFFERED,
+                }
+
+                const fn ctl_code(
+                    dev_type: DeviceType,
+                    function: u32,
+                    method: Method,
+                    access: FILE_ACCESS_RIGHTS,
+                ) -> u32 {
+                    // Taken from CTL_CODE macro from d4drvif.h
+                    ((dev_type as u32) << 16)
+                        | ((access.0) << 14)
+                        | ((function) << 2)
+                        | (method as u32)
+                }
+
+                const fn make(pre_function: PreFunction) -> u32 {
+                    ctl_code(
+                        DeviceType::Unknown,
+                        pre_function as u32,
+                        Method::Buffered,
+                        FILE_ACCESS_RIGHTS(FILE_READ_DATA.0 | FILE_WRITE_DATA.0),
+                    )
+                }
+
+                #[repr(u32)]
+                enum PreFunction {
+                    PluginHardware = 0x800,
+                    PlugoutHardware,
+                    GetImportedDevices,
+                    SetPersistent,
+                    GetPersistent,
+                }
+
+                pub struct PluginHardware {}
+
+                impl PluginHardware {
+                    pub const FUNCTION: u32 = make(PreFunction::PluginHardware);
+                }
+
+                pub struct PlugoutHardware {}
+
+                impl PlugoutHardware {
+                    pub const FUNCTION: u32 = make(PreFunction::PlugoutHardware);
+                }
+
+                #[repr(C)]
+                pub struct GetImportedDevices {}
+
+                impl GetImportedDevices {
+                    pub const FUNCTION: u32 = make(PreFunction::GetImportedDevices);
+                }
+
+                pub struct SetPersistent;
+
+                impl SetPersistent {
+                    pub const FUNCTION: u32 = make(PreFunction::SetPersistent);
+                }
+
+                pub struct GetPersistent;
+
+                impl GetPersistent {
+                    pub const FUNCTION: u32 = make(PreFunction::GetPersistent);
+                }
+            }
             use windows::{
                 core::{GUID, PCWSTR},
                 Win32::{
@@ -66,19 +143,22 @@ mod windows {
         use std::{
             ffi::OsString,
             fs::File,
-            os::windows::{ffi::OsStringExt, fs::OpenOptionsExt},
+            ops::Deref,
+            os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::{AsHandle, AsRawHandle}},
             path::PathBuf,
         };
 
         use windows::{
             core::{GUID, PCWSTR},
             Win32::{
-                Devices::DeviceAndDriverInstallation::CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
-                Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE},
+                Devices::DeviceAndDriverInstallation::CM_GET_DEVICE_INTERFACE_LIST_PRESENT, Foundation::HANDLE, Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE}, System::IO::DeviceIoControl
             },
         };
 
-        use crate::vhci::{ImportedDeviceInner, UsbIdInner, VhciDriver};
+        use crate::{
+            vhci::{inner, VhciDriver},
+            windows::vhci::utils::ioctl,
+        };
 
         use super::Win32Error;
 
@@ -90,12 +170,27 @@ mod windows {
             [0x87, 0xEB, 0xE5, 0x51, 0x5A, 0x09, 0x35, 0xC0],
         );
 
+        pub struct PortRecord {
+            port: i32,
+            inner: inner::PortRecord,
+        }
+
         pub struct WindowsImportedDevice {
-            inner: ImportedDeviceInner,
+            inner: inner::ImportedDevice,
+            record: PortRecord,
+            speed: crate::DeviceSpeed,
         }
 
         pub struct UsbId<'a> {
-            inner: UsbIdInner<'a>,
+            inner: inner::UsbId<'a>,
+        }
+
+        impl<'a> Deref for UsbId<'a> {
+            type Target = inner::UsbId<'a>;
+
+            fn deref(&self) -> &Self::Target {
+                &self.inner
+            }
         }
 
         struct DriverInner {
@@ -103,6 +198,10 @@ mod windows {
         }
 
         impl DriverInner {
+            fn as_raw_handle(&self) -> HANDLE {
+                HANDLE(self.handle.as_raw_handle() as isize)
+            }
+
             fn try_open() -> crate::vhci::Result<Self> {
                 let file = File::options()
                     .create(true)
@@ -114,7 +213,21 @@ mod windows {
                 Ok(Self { handle: file })
             }
 
-            fn imported_devices(&self) -> Box<[WindowsImportedDevice]> {
+            fn imported_devices(&self) -> ::windows::core::Result<Box<[WindowsImportedDevice]>> {
+                let mut result = Vec::<WindowsImportedDevice>::new();
+
+                unsafe {
+                    DeviceIoControl(
+                        self.as_raw_handle(),
+                        ioctl::GetImportedDevices::FUNCTION,
+                        None,
+                        0,
+                        None,
+                        0,
+                        None,
+                        None,
+                    )?;
+                };
                 todo!()
             }
         }
@@ -239,7 +352,6 @@ pub mod net {
 use core::fmt;
 use std::{
     ffi::{c_char, OsStr},
-    net::SocketAddr,
     num::ParseIntError,
     path::Path,
     str::FromStr,

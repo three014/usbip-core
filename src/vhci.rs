@@ -7,14 +7,14 @@ mod platform {
 
     #[cfg(windows)]
     pub use crate::windows::vhci::{
-        UsbId, WindowsImportedDevice as ImportedDevice, WindowsVhciDriver as Driver, STATE_PATH,
+        PortRecord, UsbId, WindowsImportedDevice as ImportedDevice, WindowsVhciDriver as Driver, STATE_PATH,
     };
 }
 
 pub mod inner {
-    use std::{net::SocketAddr, ffi::c_char};
+    use std::{ffi::c_char, net::SocketAddr};
 
-    use crate::{containers::buffer::Buffer, BUS_ID_SIZE, DeviceStatus};
+    use crate::{containers::buffer::Buffer, DeviceStatus, BUS_ID_SIZE};
 
     #[derive(Debug)]
     pub struct ImportedDevice {
