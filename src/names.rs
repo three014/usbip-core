@@ -1,3 +1,4 @@
+use core::fmt;
 use std::{
     collections::HashMap,
     fs,
@@ -40,6 +41,77 @@ impl Names {
 
     pub fn protocol(&self, class: u8, subclass: u8, protocol: u8) -> Option<&str> {
         self.inner.protocol(class, subclass, protocol)
+    }
+
+    pub fn product_display<'a: 'b, 'b>(&'a self, vendor: u16, product: u16) -> Product<'b> {
+        Product {
+            product_str: self.product(vendor, product),
+            product,
+            vendor_str: self.vendor(vendor),
+            vendor,
+        }
+    }
+
+    pub fn class_display<'a: 'b, 'b>(&'a self, class: u8, subclass: u8, protocol: u8) -> Class<'b> {
+        Class {
+            class_str: self.class(class),
+            class,
+            subclass_str: self.subclass(class, subclass),
+            subclass,
+            protocol_str: self.protocol(class, subclass, protocol),
+            protocol,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Class<'a> {
+    class_str: Option<&'a str>,
+    class: u8,
+    subclass_str: Option<&'a str>,
+    subclass: u8,
+    protocol_str: Option<&'a str>,
+    protocol: u8,
+}
+
+impl fmt::Display for Class<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.class == 0 && self.subclass == 0 && self.protocol == 0 {
+            write!(f, "(Defined at Interface level)")?;
+        } else {
+            let class = self.class_str.unwrap_or("unknown class");
+            let subclass = self.subclass_str.unwrap_or("unknown subclass");
+            let protocol = self.protocol_str.unwrap_or("unknown protocol");
+
+            write!(f, "{class} / {subclass} / {protocol} ")?;
+        }
+
+        write!(
+            f,
+            "({:02x}/{:02x}/{:02x})",
+            self.class, self.subclass, self.protocol
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Product<'a> {
+    product_str: Option<&'a str>,
+    product: u16,
+    vendor_str: Option<&'a str>,
+    vendor: u16,
+}
+
+impl fmt::Display for Product<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let prod = self.product_str.unwrap_or("unknown product");
+        let vend = self.vendor_str.unwrap_or("unknown vendor");
+
+        write!(
+            f,
+            "{vend} : {prod} ({:04x}:{:04x})",
+            self.vendor, self.product
+        )
     }
 }
 
@@ -102,7 +174,7 @@ impl FromStr for VendorKey {
     type Err = ParseIntError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(VendorKey(s.parse()?))
+        Ok(VendorKey(u16::from_str_radix(s, 16)?))
     }
 }
 
@@ -116,7 +188,7 @@ impl ProductKey {
     fn from_str_and_vendor(s: &str, vendor: u16) -> Result<Self, ParseIntError> {
         Ok(ProductKey {
             vendor,
-            product: s.parse()?,
+            product: u16::from_str_radix(s, 16)?,
         })
     }
 }
@@ -137,7 +209,7 @@ impl FromStr for ClassKey {
     type Err = ParseIntError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(ClassKey(s.parse()?))
+        Ok(ClassKey(u8::from_str_radix(s, 16)?))
     }
 }
 
@@ -150,7 +222,7 @@ impl SubclassKey {
     fn from_str_and_class(s: &str, class: u8) -> Result<SubclassKey, ParseIntError> {
         Ok(SubclassKey {
             class,
-            subclass: s.parse()?,
+            subclass: u8::from_str_radix(s, 16)?,
         })
     }
 }
@@ -180,7 +252,7 @@ impl ProtocolKey {
         Ok(ProtocolKey {
             class,
             subclass,
-            protocol: s.parse()?,
+            protocol: u8::from_str_radix(s, 16)?,
         })
     }
 }
@@ -249,14 +321,9 @@ where
 {
     let mut names = NamesInner::new();
     let mut last_state = LastState::Start;
-    let reader = BufReader::new(fs::File::open(path)?);
+    let reader = fs::read_to_string(path)?;
 
-    for (line, _num) in reader
-        .lines()
-        .map(|result| result.unwrap_or(String::new()))
-        .zip(1usize..)
-    {
-        let line = line.as_str();
+    for (line, _num) in reader.lines().zip(1usize..) {
         if can_skip(line) {
             continue;
         }
@@ -324,4 +391,26 @@ where
     Ok(Names {
         inner: Arc::from(names),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_vendor_works() {
+        parse_vendor("0001  Fry's Electronics").unwrap();
+        parse_vendor("0002  Ingram").unwrap();
+        parse_vendor("0003  Club Mac").unwrap();
+    }
+
+    #[test]
+    fn parse_vendor_hex() {
+        parse_vendor("001f  Walmart").unwrap();
+    }
+
+    #[test]
+    fn parse_product_works() {
+        parse_product("\t7778  Counterfeit flash drive [Kingston]", 1).unwrap();
+    }
 }
