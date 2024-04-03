@@ -257,9 +257,7 @@ impl fmt::Display for UnixIdevDisplay<'_, '_> {
             usb_dev.speed()
         )?;
 
-        let product = self
-            .names
-            .product_display(idev.vendor(), idev.product());
+        let product = self.names.product_display(idev.vendor(), idev.product());
         writeln!(f, "       {product}")?;
 
         match record {
@@ -406,39 +404,15 @@ impl TryFrom<InitData<'_>> for IdevRecords {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct UsbId<'a> {
-    inner: inner::UsbId<'a>,
-    dev_id: u32,
-    speed: crate::DeviceSpeed,
-}
-
-impl UsbId<'_> {
-    pub const fn dev_id(&self) -> u32 {
-        self.dev_id
-    }
-
-    pub const fn speed(&self) -> crate::DeviceSpeed {
-        self.speed
-    }
-}
-
-impl<'a> Deref for UsbId<'a> {
-    type Target = inner::UsbId<'a>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
 impl crate::UsbDevice {
-    pub fn usb_id(&self) -> UsbId<'_> {
-        UsbId {
-            inner: inner::UsbId {
+    pub fn attach_args(&self, socket: TcpStream) -> AttachArgs {
+        AttachArgs {
+            base: inner::AttachArgs {
                 bus_id: self.bus_id(),
+                socket,
             },
             dev_id: self.dev_id(),
-            speed: self.speed(),
+            device_speed: self.speed(),
         }
     }
 }
@@ -510,9 +484,14 @@ impl DriverInner {
         Ok(())
     }
 
-    fn attach(&mut self, socket: TcpStream, usb_id: UsbId) -> crate::vhci::Result<u16> {
+    fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
         use crate::vhci::error::*;
-        let port = match self.imported_devices.next_available(usb_id.speed) {
+        let AttachArgs {
+            base: inner::AttachArgs { bus_id, socket },
+            dev_id,
+            device_speed,
+        } = args;
+        let port = match self.imported_devices.next_available(device_speed) {
             Some(port) => port,
             None => {
                 return Err(Error::AttachFailed(AttachError {
@@ -544,8 +523,8 @@ impl DriverInner {
             "{} {} {} {}",
             port,
             socket.as_raw_fd(),
-            usb_id.dev_id,
-            usb_id.speed as u32
+            dev_id,
+            device_speed as u32
         )
         .unwrap();
         if let Err(e) = file.write_all(
@@ -561,11 +540,9 @@ impl DriverInner {
 
         self.imported_devices
             .activate(port, |_| {
-                let udev = udev::Device::from_subsystem_sysname(
-                    "usb".to_owned(),
-                    usb_id.bus_id().to_owned(),
-                )
-                .expect("Creating repr of device already attached");
+                let udev =
+                    udev::Device::from_subsystem_sysname("usb".to_owned(), bus_id.to_owned())
+                        .expect("Creating repr of device already attached");
                 let usb_dev: crate::UsbDevice = udev.try_into().unwrap();
                 UnixImportedDevice {
                     inner: inner::ImportedDevice {
@@ -573,15 +550,21 @@ impl DriverInner {
                         status: DeviceStatus::PortInUse,
                         vendor: usb_dev.id_vendor,
                         product: usb_dev.id_product,
-                        devid: usb_id.dev_id(),
+                        devid: dev_id,
                     },
                     usb_dev,
-                    hub: usb_id.speed().try_into().unwrap(),
+                    hub: device_speed.try_into().unwrap(),
                 }
             })
             .expect("Port should've been open");
         Ok(port)
     }
+}
+
+pub struct AttachArgs<'a> {
+    base: inner::AttachArgs<'a>,
+    dev_id: u32,
+    device_speed: DeviceSpeed,
 }
 
 impl crate::vhci::VhciDriver for UnixDriver {
@@ -595,8 +578,8 @@ impl crate::vhci::VhciDriver for UnixDriver {
         todo!()
     }
 
-    fn attach(&mut self, socket: TcpStream, usb_id: UsbId) -> crate::vhci::Result<u16> {
-        self.inner.attach(socket, usb_id)
+    fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
+        self.inner.attach(args)
     }
 }
 

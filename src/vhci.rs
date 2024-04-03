@@ -2,17 +2,22 @@ pub(crate) mod error;
 mod platform {
     #[cfg(unix)]
     pub use crate::unix::vhci2::{
-        PortRecord, UnixDriver as Driver, UnixImportedDevice as ImportedDevice, UsbId, STATE_PATH,
+        AttachArgs, PortRecord, UnixDriver as Driver, UnixImportedDevice as ImportedDevice,
+        STATE_PATH,
     };
 
     #[cfg(windows)]
     pub use crate::windows::vhci::{
-        PortRecord, UsbId, WindowsImportedDevice as ImportedDevice, WindowsVhciDriver as Driver, STATE_PATH,
+        PortRecord, WindowsImportedDevice as ImportedDevice, WindowsVhciDriver as Driver,
+        STATE_PATH,
     };
 }
 
 pub mod inner {
-    use std::{ffi::c_char, net::SocketAddr};
+    use std::{
+        ffi::c_char,
+        net::{SocketAddr, TcpStream},
+    };
 
     use crate::{containers::buffer::Buffer, DeviceStatus, BUS_ID_SIZE};
 
@@ -63,24 +68,18 @@ pub mod inner {
         }
     }
 
-    #[derive(Debug, Clone)]
-    pub struct UsbId<'a> {
-        pub(crate) bus_id: &'a str,
-    }
-
-    impl UsbId<'_> {
-        pub const fn bus_id(&self) -> &str {
-            self.bus_id
-        }
+    #[derive(Debug)]
+    pub struct AttachArgs<'a> {
+        pub bus_id: &'a str,
+        pub socket: TcpStream,
     }
 }
 
 use core::fmt;
-use std::net::TcpStream;
 use std::str::FromStr;
 
 pub use error::Error;
-pub use platform::{Driver, ImportedDevice, PortRecord, UsbId, STATE_PATH};
+pub use platform::{AttachArgs, Driver, ImportedDevice, PortRecord, STATE_PATH};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -143,6 +142,6 @@ impl std::error::Error for ParseHubSpeedError {}
 
 pub trait VhciDriver: Sized + crate::util::__private::Sealed {
     fn open() -> Result<Self>;
-    fn attach(&mut self, socket: TcpStream, usb_id: UsbId) -> Result<u16>;
+    fn attach(&mut self, args: AttachArgs) -> Result<u16>;
     fn detach(&mut self, port: u16) -> Result<()>;
 }
