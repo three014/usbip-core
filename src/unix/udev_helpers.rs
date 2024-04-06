@@ -3,7 +3,7 @@ use std::{
     num::ParseIntError, str::FromStr,
 };
 
-use crate::containers::{beef::Beef, buffer};
+use crate::containers::{beef::Beef, stacktools};
 
 #[derive(Debug)]
 pub enum Error {
@@ -94,7 +94,7 @@ pub enum ParseAttributeError {
     Int(ParseIntError),
     Dyn(Box<dyn std::error::Error>),
     NotUtf8,
-    Buffer(buffer::FormatError),
+    Buffer(stacktools::TryFromStrErr),
 }
 
 impl std::fmt::Display for ParseAttributeError {
@@ -135,8 +135,8 @@ impl From<ParseIntError> for ParseAttributeError {
     }
 }
 
-impl From<buffer::FormatError> for ParseAttributeError {
-    fn from(value: buffer::FormatError) -> Self {
+impl From<stacktools::TryFromStrErr> for ParseAttributeError {
+    fn from(value: stacktools::TryFromStrErr) -> Self {
         Self::Buffer(value)
     }
 }

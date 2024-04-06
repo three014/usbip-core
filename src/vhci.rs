@@ -14,12 +14,9 @@ mod platform {
 }
 
 pub mod inner {
-    use std::{
-        ffi::c_char,
-        net::{SocketAddr, TcpStream},
-    };
+    use std::net::SocketAddr;
 
-    use crate::{containers::buffer::Buffer, DeviceStatus, BUS_ID_SIZE};
+    use crate::{containers::stacktools::StackStr, DeviceStatus, BUS_ID_SIZE};
 
     #[derive(Debug)]
     pub struct ImportedDevice {
@@ -55,7 +52,7 @@ pub mod inner {
     #[derive(Debug)]
     pub struct PortRecord {
         pub(crate) host: SocketAddr,
-        pub(crate) busid: Buffer<BUS_ID_SIZE, c_char>,
+        pub(crate) busid: StackStr<BUS_ID_SIZE>,
     }
 
     impl PortRecord {
@@ -64,14 +61,8 @@ pub mod inner {
         }
 
         pub fn bus_id(&self) -> &str {
-            self.busid.to_str().unwrap()
+            &self.busid
         }
-    }
-
-    #[derive(Debug)]
-    pub struct AttachArgs<'a> {
-        pub bus_id: &'a str,
-        pub socket: TcpStream,
     }
 }
 
@@ -142,6 +133,6 @@ impl std::error::Error for ParseHubSpeedError {}
 
 pub trait VhciDriver: Sized + crate::util::__private::Sealed {
     fn open() -> Result<Self>;
-    fn attach(&mut self, args: AttachArgs) -> Result<u16>;
+    fn attach(&mut self, args: AttachArgs) -> std::result::Result<u16, error::AttachError>;
     fn detach(&mut self, port: u16) -> Result<()>;
 }

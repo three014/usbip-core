@@ -1,40 +1,32 @@
 #[cfg(test)]
 mod tests {
-    use crate::{unix::USB_IDS, vhci::VhciDriver};
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use crate::vhci::VhciDriver;
 
     use super::*;
 
     #[test]
     fn driver_opens() {
-        match UnixDriver::open() {
-            Ok(d) => match crate::names::parse(USB_IDS) {
-                Ok(names) => {
-                    d.imported_devices()
-                        .for_each(|idev| println!("{}", idev.display(&names)));
-                }
-                Err(e) => eprintln!("Couldn't open names: {e}"),
-            },
-            Err(e) => println!("{e}"),
-        }
+        UnixDriver::open().unwrap();
     }
 
     #[test]
     fn parse_record() {
         let record = str::parse::<PortRecord>("127.0.0.1 3240 1-1").unwrap();
-        println!(
-            "Host: {}, busid: {}",
-            record.inner.host,
-            record.inner.busid.to_str().unwrap()
+        assert_eq!(
+            record.host(),
+            &SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 3240)
         );
+        assert_eq!(record.bus_id(), "1-1");
     }
 }
 
-use core::fmt;
+use core::fmt::{self, Write};
 use std::{
     collections::HashMap,
-    ffi::c_char,
     fs,
-    io::{self, Write},
+    io::{self, Write as IoWrite},
     net::{AddrParseError, IpAddr, SocketAddr, TcpStream},
     num::{NonZeroUsize, ParseIntError},
     ops::Deref,
@@ -46,7 +38,7 @@ use std::{
 use crate::{
     containers::{
         beef::Beef,
-        buffer::{self, Buffer},
+        stacktools::{StackStr, self},
     },
     util::parse_token,
     vhci::{inner, HubSpeed},
@@ -116,7 +108,7 @@ impl FromStr for MaybeIdev {
 
 #[derive(Debug)]
 pub enum PortRecordError {
-    Buffer(buffer::FormatError),
+    Buffer(stacktools::TryFromStrErr),
     Io(io::Error),
     Addr(AddrParseError),
     Int(ParseIntError),
@@ -153,8 +145,8 @@ impl From<ParseIntError> for PortRecordError {
     }
 }
 
-impl From<buffer::FormatError> for PortRecordError {
-    fn from(value: buffer::FormatError) -> Self {
+impl From<stacktools::TryFromStrErr> for PortRecordError {
+    fn from(value: stacktools::TryFromStrErr) -> Self {
         Self::Buffer(value)
     }
 }
@@ -379,21 +371,19 @@ struct InitData<'a> {
 impl TryFrom<InitData<'_>> for IdevRecords {
     type Error = UdevError;
 
-    fn try_from(init: InitData<'_>) -> Result<Self, Self::Error> {
-        let mut attr_buf = Buffer::<20, c_char>::new();
+    fn try_from(init: InitData) -> Result<Self, Self::Error> {
+        let mut attr = StackStr::<20>::new();
         let mut idevs = Vec::with_capacity(init.num_ports.get());
 
-        write!(attr_buf.as_mut_u8_bytes(), "status").unwrap();
+        write!(attr, "status").unwrap();
 
         for i in 0..init.num_controllers.get() {
             if i > 0 {
-                attr_buf.as_mut_u8_bytes().fill(0);
-                write!(attr_buf.as_mut_u8_bytes(), "status.{i}").unwrap();
+                attr.clear();
+                write!(attr, "status.{i}").unwrap();
             }
 
-            let status = init
-                .hc_device
-                .sysattr(Beef::Borrowed(attr_buf.to_str().unwrap()))?;
+            let status = init.hc_device.sysattr(Beef::Borrowed(&attr))?;
             let mut lines = status.lines();
             lines.next();
             for line in lines {
@@ -407,10 +397,8 @@ impl TryFrom<InitData<'_>> for IdevRecords {
 impl crate::UsbDevice {
     pub fn attach_args(&self, socket: TcpStream) -> AttachArgs {
         AttachArgs {
-            base: inner::AttachArgs {
-                bus_id: self.bus_id(),
-                socket,
-            },
+            bus_id: self.bus_id(),
+            socket,
             dev_id: self.dev_id(),
             device_speed: self.speed(),
         }
@@ -484,58 +472,53 @@ impl DriverInner {
         Ok(())
     }
 
-    fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
+    fn attach(&mut self, args: AttachArgs) -> Result<u16, crate::vhci::error::AttachError> {
         use crate::vhci::error::*;
         let AttachArgs {
-            base: inner::AttachArgs { bus_id, socket },
+            bus_id,
+            socket,
             dev_id,
             device_speed,
         } = args;
         let port = match self.imported_devices.next_available(device_speed) {
             Some(port) => port,
             None => {
-                return Err(Error::AttachFailed(AttachError {
+                return Err(AttachError {
                     socket,
                     kind: AttachErrorKind::OutOfPorts,
-                }))
+                })
             }
         };
-        let mut path_buf = Buffer::<SYSFS_PATH_MAX, c_char>::new();
         let path = self.udev().syspath();
-        write!(path_buf.as_mut_u8_bytes(), "{:?}/attach", path).unwrap();
+        let path = StackStr::<SYSFS_PATH_MAX>::try_from(format_args!("{:?}/attach", path)).unwrap();
         let mut file = match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(path_buf.to_str().unwrap())
+            .open(path.as_path())
         {
             Ok(file) => file,
             Err(e) => {
-                return Err(Error::AttachFailed(AttachError {
+                return Err(AttachError {
                     socket,
                     kind: AttachErrorKind::SysFs(e),
-                }))
+                })
             }
         };
-        let mut buf = Buffer::<200, c_char>::new();
 
-        write!(
-            buf.as_mut_u8_bytes(),
+        let buf = StackStr::<200>::try_from(format_args!(
             "{} {} {} {}",
             port,
             socket.as_raw_fd(),
             dev_id,
             device_speed as u32
-        )
+        ))
         .unwrap();
-        if let Err(e) = file.write_all(
-            buf.as_u8_bytes()
-                .strip_suffix(&[0u8])
-                .unwrap_or(buf.as_u8_bytes()),
-        ) {
-            return Err(Error::AttachFailed(AttachError {
+
+        if let Err(e) = file.write_all(buf.as_bytes()) {
+            return Err(AttachError {
                 socket,
                 kind: AttachErrorKind::SysFs(e),
-            }));
+            });
         }
 
         self.imported_devices
@@ -562,9 +545,10 @@ impl DriverInner {
 }
 
 pub struct AttachArgs<'a> {
-    base: inner::AttachArgs<'a>,
-    dev_id: u32,
-    device_speed: DeviceSpeed,
+    pub socket: TcpStream,
+    pub bus_id: &'a str,
+    pub dev_id: u32,
+    pub device_speed: DeviceSpeed,
 }
 
 impl crate::vhci::VhciDriver for UnixDriver {
@@ -578,7 +562,7 @@ impl crate::vhci::VhciDriver for UnixDriver {
         todo!()
     }
 
-    fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
+    fn attach(&mut self, args: AttachArgs) -> Result<u16, crate::vhci::error::AttachError> {
         self.inner.attach(args)
     }
 }

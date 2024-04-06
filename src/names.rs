@@ -1,13 +1,5 @@
 use core::fmt;
-use std::{
-    collections::HashMap,
-    fs,
-    io::{self, BufRead, BufReader},
-    num::ParseIntError,
-    path::Path,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{collections::HashMap, fs, io, num::ParseIntError, path::Path, str::FromStr, sync::Arc};
 
 #[derive(Debug)]
 struct NamesInner {
@@ -23,6 +15,80 @@ pub struct Names {
 }
 
 impl Names {
+    fn parse(buf: &str) -> Names {
+        let mut names = NamesInner::new();
+        let mut last_state = LastState::Start;
+
+        for (line, _num) in buf.lines().zip(1usize..) {
+            if can_skip(line) {
+                continue;
+            }
+
+            if line.contains("L ") {
+                last_state = LastState::Lang;
+                continue;
+            }
+
+            if let Some((key, text)) = parse_class(line) {
+                if names.class.insert(key, text).is_some() {
+                    // Print message about duplicate vendor spec?
+                }
+                last_state = LastState::Class(key);
+                continue;
+            }
+
+            if let Some((key, text)) = parse_vendor(line) {
+                if names.vendor.insert(key, text).is_some() {
+                    // Etc...
+                }
+                last_state = LastState::Vendor(key);
+                continue;
+            }
+
+            if line.contains("HUT ") {
+                last_state = LastState::Hut;
+                continue;
+            }
+
+            match last_state {
+                LastState::Start | LastState::Lang | LastState::Hut => {}
+                LastState::Class(ClassKey(class)) => {
+                    if let Some((key, text)) = parse_subclass(line, class) {
+                        if names.subclass.insert(key, text).is_some() {
+                            // Err...
+                        }
+                        last_state = LastState::Subclass(key);
+                    }
+                }
+                LastState::Subclass(SubclassKey { class, subclass }) => {
+                    if let Some((key, text)) = parse_subclass(line, class) {
+                        if names.subclass.insert(key, text).is_some() {
+                            // Err...
+                        }
+                        last_state = LastState::Subclass(key);
+                    } else if let Some((key, text)) = parse_protocol(line, class, subclass) {
+                        if names.protocol.insert(key, text).is_some() {
+                            // Err...
+                        }
+                    }
+                }
+                LastState::Vendor(VendorKey(vendor))
+                | LastState::Product(ProductKey { vendor, product: _ }) => {
+                    if let Some((key, text)) = parse_product(line, vendor) {
+                        if names.product.insert(key, text).is_some() {
+                            // Print message about duplicate vendor spec?
+                        }
+                        last_state = LastState::Product(key);
+                    }
+                }
+            }
+        }
+
+        Names {
+            inner: Arc::from(names),
+        }
+    }
+
     pub fn vendor(&self, vendor: u16) -> Option<&str> {
         self.inner.vendor(vendor)
     }
@@ -319,78 +385,8 @@ pub fn parse<P>(path: P) -> io::Result<Names>
 where
     P: AsRef<Path>,
 {
-    let mut names = NamesInner::new();
-    let mut last_state = LastState::Start;
     let reader = fs::read_to_string(path)?;
-
-    for (line, _num) in reader.lines().zip(1usize..) {
-        if can_skip(line) {
-            continue;
-        }
-
-        if line.contains("L ") {
-            last_state = LastState::Lang;
-            continue;
-        }
-
-        if let Some((key, text)) = parse_class(line) {
-            if names.class.insert(key, text).is_some() {
-                // Print message about duplicate vendor spec?
-            }
-            last_state = LastState::Class(key);
-            continue;
-        }
-
-        if let Some((key, text)) = parse_vendor(line) {
-            if names.vendor.insert(key, text).is_some() {
-                // Etc...
-            }
-            last_state = LastState::Vendor(key);
-            continue;
-        }
-
-        if line.contains("HUT ") {
-            last_state = LastState::Hut;
-            continue;
-        }
-
-        match last_state {
-            LastState::Start | LastState::Lang | LastState::Hut => {}
-            LastState::Class(ClassKey(class)) => {
-                if let Some((key, text)) = parse_subclass(line, class) {
-                    if names.subclass.insert(key, text).is_some() {
-                        // Err...
-                    }
-                    last_state = LastState::Subclass(key);
-                }
-            }
-            LastState::Subclass(SubclassKey { class, subclass }) => {
-                if let Some((key, text)) = parse_subclass(line, class) {
-                    if names.subclass.insert(key, text).is_some() {
-                        // Err...
-                    }
-                    last_state = LastState::Subclass(key);
-                } else if let Some((key, text)) = parse_protocol(line, class, subclass) {
-                    if names.protocol.insert(key, text).is_some() {
-                        // Err...
-                    }
-                }
-            }
-            LastState::Vendor(VendorKey(vendor))
-            | LastState::Product(ProductKey { vendor, product: _ }) => {
-                if let Some((key, text)) = parse_product(line, vendor) {
-                    if names.product.insert(key, text).is_some() {
-                        // Print message about duplicate vendor spec?
-                    }
-                    last_state = LastState::Product(key);
-                }
-            }
-        }
-    }
-
-    Ok(Names {
-        inner: Arc::from(names),
-    })
+    Ok(Names::parse(&reader))
 }
 
 #[cfg(test)]

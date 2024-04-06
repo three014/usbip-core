@@ -144,14 +144,21 @@ mod windows {
             ffi::OsString,
             fs::File,
             ops::Deref,
-            os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::{AsHandle, AsRawHandle}},
+            os::windows::{
+                ffi::OsStringExt,
+                fs::OpenOptionsExt,
+                io::{AsHandle, AsRawHandle},
+            },
             path::PathBuf,
         };
 
         use windows::{
             core::{GUID, PCWSTR},
             Win32::{
-                Devices::DeviceAndDriverInstallation::CM_GET_DEVICE_INTERFACE_LIST_PRESENT, Foundation::HANDLE, Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE}, System::IO::DeviceIoControl
+                Devices::DeviceAndDriverInstallation::CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+                Foundation::HANDLE,
+                Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE},
+                System::IO::DeviceIoControl,
             },
         };
 
@@ -316,8 +323,8 @@ pub mod names;
 pub mod vhci;
 pub mod containers {
     pub mod beef;
-    pub mod buffer;
     pub mod singleton;
+    pub mod stacktools;
 }
 mod util;
 pub mod net {
@@ -350,14 +357,9 @@ pub mod net {
 }
 
 use core::fmt;
-use std::{
-    ffi::{c_char, OsStr},
-    num::ParseIntError,
-    path::Path,
-    str::FromStr,
-};
+use std::{num::ParseIntError, path::Path, str::FromStr};
 
-use containers::buffer::Buffer;
+use containers::stacktools::StackStr;
 use serde::{Deserialize, Serialize};
 
 pub use platform::USB_IDS;
@@ -369,8 +371,8 @@ pub const BUS_ID_SIZE: usize = 32;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsbDevice {
-    path: Buffer<DEV_PATH_MAX, c_char>,
-    busid: Buffer<BUS_ID_SIZE, c_char>,
+    path: StackStr<DEV_PATH_MAX>,
+    busid: StackStr<BUS_ID_SIZE>,
     busnum: u32,
     devnum: u32,
     speed: DeviceSpeed,
@@ -387,12 +389,11 @@ pub struct UsbDevice {
 
 impl UsbDevice {
     pub fn path(&self) -> &Path {
-        let s = self.path.to_str().unwrap();
-        Path::new(OsStr::new(s))
+        self.path.as_path()
     }
 
     pub fn bus_id(&self) -> &str {
-        self.busid.to_str().unwrap()
+        &self.busid
     }
 
     pub const fn dev_id(&self) -> u32 {

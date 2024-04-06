@@ -4,14 +4,14 @@ pub mod vhci2;
 use crate::{
     containers::{
         beef::Beef,
-        buffer::{Buffer, FormatError},
+        stacktools::{self, StackStr},
     },
     unix::udev_helpers::UdevHelper,
     BUS_ID_SIZE, DEV_PATH_MAX,
 };
 use std::{
     borrow::Cow,
-    ffi::{c_char, OsStr},
+    ffi::OsStr,
     os::unix::ffi::OsStrExt,
     path::Path,
 };
@@ -22,16 +22,18 @@ use udev_helpers::ParseAttributeError;
 
 pub static USB_IDS: &str = "/usr/share/hwdata/usb.ids";
 
-impl<const N: usize> TryFrom<&OsStr> for Buffer<N, c_char> {
-    type Error = FormatError;
+impl<const N: usize> TryFrom<&OsStr> for StackStr<N> {
+    type Error = stacktools::TryFromStrErr;
 
     fn try_from(value: &OsStr) -> Result<Self, Self::Error> {
-        value.as_bytes().try_into()
+        std::str::from_utf8(value.as_bytes())
+            .map_err(|err| stacktools::TryFromStrErr::NotUtf8(err))?
+            .try_into()
     }
 }
 
-impl<const N: usize> TryFrom<&Path> for Buffer<N, c_char> {
-    type Error = FormatError;
+impl<const N: usize> TryFrom<&Path> for StackStr<N> {
+    type Error = stacktools::TryFromStrErr;
 
     fn try_from(value: &Path) -> Result<Self, Self::Error> {
         value.as_os_str().try_into()
@@ -42,8 +44,8 @@ impl TryFrom<udev::Device> for crate::UsbDevice {
     type Error = ParseAttributeError;
 
     fn try_from(udev: udev::Device) -> Result<Self, Self::Error> {
-        let path: Buffer<DEV_PATH_MAX, c_char> = udev.syspath().try_into()?;
-        let busid: Buffer<BUS_ID_SIZE, c_char> = udev.sysname().try_into()?;
+        let path: StackStr<DEV_PATH_MAX> = udev.syspath().try_into()?;
+        let busid: StackStr<BUS_ID_SIZE> = udev.sysname().try_into()?;
         let id_vendor: u16 = udev.parse_sysattr(Beef::Static("idVendor"))?;
         let id_product: u16 = udev.parse_sysattr(Beef::Static("idProduct"))?;
         let busnum: u32 = udev.parse_sysattr(Beef::Static("busnum"))?;
