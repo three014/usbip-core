@@ -19,7 +19,7 @@ where
         .expect("Token should be valid")
 }
 
-pub fn cast_cchar_to_u8(a: &[c_char]) -> &[u8] {
+pub const fn cast_cchar_to_u8(a: &[c_char]) -> &[u8] {
     // SAFETY: The slice is of type c_char, which can
     //         only be u8 (in which this cast does nothing)
     //         or i8. UTF-8 allows individual character bytes

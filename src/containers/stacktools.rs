@@ -43,6 +43,10 @@ impl<const N: usize> StackStr<N> {
         self.buf.fill(0);
         self.len = 0;
     }
+
+    pub const unsafe fn from_raw_parts(buf: [c_char; N], len: usize) -> Self {
+        Self { buf, len }
+    }
 }
 
 impl<const N: usize> Deref for StackStr<N> {
@@ -121,7 +125,9 @@ impl<'de, const N: usize> Deserialize<'de> for StackStr<N> {
             .unwrap_or(buf.as_slice())
             .len();
 
-        Ok(Self { len, buf })
+        // SAFETY: The entire array was checked to be a valid UTF-8 string,
+        //         and the length was correctly calculated.
+        Ok(unsafe { Self::from_raw_parts(buf, len) })
     }
 }
 
