@@ -3,7 +3,7 @@ mod platform {
     #[cfg(unix)]
     pub use crate::unix::vhci2::{
         AttachArgs, PortRecord, UnixDriver as Driver, UnixImportedDevice as ImportedDevice,
-        STATE_PATH,
+        STATE_PATH, UnixImportedDevices as ImportedDevices,
     };
 
     #[cfg(windows)]
