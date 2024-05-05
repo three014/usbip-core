@@ -9,7 +9,7 @@ mod platform {
     #[cfg(windows)]
     pub use crate::windows::vhci::{
         PortRecord, WindowsImportedDevice as ImportedDevice, WindowsVhciDriver as Driver,
-        STATE_PATH,
+        STATE_PATH, AttachArgs, WindowsImportedDevices as ImportedDevices
     };
 }
 
@@ -70,7 +70,8 @@ use core::fmt;
 use std::str::FromStr;
 
 pub use error::Error;
-pub use platform::{AttachArgs, Driver, ImportedDevice, PortRecord, STATE_PATH};
+pub use platform::{AttachArgs, Driver, ImportedDevice, ImportedDevices, PortRecord, STATE_PATH};
+
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -135,5 +136,5 @@ pub trait VhciDriver: Sized + crate::util::__private::Sealed {
     fn open() -> Result<Self>;
     fn attach(&mut self, args: AttachArgs) -> std::result::Result<u16, error::AttachError>;
     fn detach(&mut self, port: u16) -> Result<()>;
-    fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ ImportedDevice> + '_;
+    fn imported_devices(&self) -> Result<ImportedDevices>;
 }
