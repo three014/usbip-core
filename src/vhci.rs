@@ -13,7 +13,7 @@ mod platform {
     };
 }
 
-pub mod inner {
+pub mod base {
     use std::net::SocketAddr;
 
     use crate::{containers::stacktools::StackStr, DeviceStatus, BUS_ID_SIZE};
@@ -135,4 +135,5 @@ pub trait VhciDriver: Sized + crate::util::__private::Sealed {
     fn open() -> Result<Self>;
     fn attach(&mut self, args: AttachArgs) -> std::result::Result<u16, error::AttachError>;
     fn detach(&mut self, port: u16) -> Result<()>;
+    fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ ImportedDevice> + '_;
 }

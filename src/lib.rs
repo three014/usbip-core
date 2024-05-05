@@ -163,7 +163,7 @@ mod windows {
         };
 
         use crate::{
-            vhci::{inner, VhciDriver},
+            vhci::{base, VhciDriver},
             windows::vhci::utils::ioctl,
         };
 

@@ -38,10 +38,10 @@ use std::{
 use crate::{
     containers::{
         beef::Beef,
-        stacktools::{StackStr, self},
+        stacktools::{self, StackStr},
     },
     util::parse_token,
-    vhci::{inner, HubSpeed},
+    vhci::{base, HubSpeed},
     DeviceSpeed, DeviceStatus,
 };
 
@@ -86,7 +86,7 @@ impl FromStr for MaybeIdev {
                     udev::Device::from_subsystem_sysname("usb".to_owned(), busid.to_owned())?;
                 let usb_dev = crate::UsbDevice::try_from(sudev)?;
                 let idev = UnixImportedDevice {
-                    inner: inner::ImportedDevice {
+                    base: base::ImportedDevice {
                         port,
                         status,
                         vendor: usb_dev.id_vendor,
@@ -96,9 +96,6 @@ impl FromStr for MaybeIdev {
                     hub,
                     usb_dev,
                 };
-
-                //debug_assert_eq!( dbg!(idev.inner.usb_dev().devnum), dbg!(idev.inner.dev_id() & 0x0000ffff) );
-                //debug_assert_eq!( dbg!(idev.inner.usb_dev().busnum), dbg!(idev.inner.dev_id() >> 16) );
 
                 Ok(MaybeIdev::InUse(idev))
             }
@@ -152,7 +149,7 @@ impl From<stacktools::TryFromStrErr> for PortRecordError {
 }
 
 pub struct PortRecord {
-    inner: inner::PortRecord,
+    base: base::PortRecord,
 }
 
 impl PortRecord {
@@ -164,10 +161,10 @@ impl PortRecord {
 }
 
 impl Deref for PortRecord {
-    type Target = inner::PortRecord;
+    type Target = base::PortRecord;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        &self.base
     }
 }
 
@@ -186,7 +183,7 @@ impl FromStr for PortRecord {
             .parse::<u16>()?;
         let busid = split.next().ok_or(PortRecordError::Invalid)?.trim();
         Ok(Self {
-            inner: inner::PortRecord {
+            base: base::PortRecord {
                 host: SocketAddr::new(host, srv_port),
                 busid: busid.try_into()?,
             },
@@ -196,7 +193,7 @@ impl FromStr for PortRecord {
 
 #[derive(Debug)]
 pub struct UnixImportedDevice {
-    inner: inner::ImportedDevice,
+    base: base::ImportedDevice,
     usb_dev: crate::UsbDevice,
     hub: HubSpeed,
 }
@@ -215,10 +212,10 @@ impl UnixImportedDevice {
 }
 
 impl Deref for UnixImportedDevice {
-    type Target = inner::ImportedDevice;
+    type Target = base::ImportedDevice;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        &self.base
     }
 }
 
@@ -229,7 +226,7 @@ struct UnixIdevDisplay<'a, 'b> {
 
 impl fmt::Display for UnixIdevDisplay<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let idev = &self.idev.inner;
+        let idev = &self.idev.base;
         let usb_dev = &self.idev.usb_dev;
         if idev.status() == DeviceStatus::PortInitializing
             || idev.status() == DeviceStatus::PortAvailable
@@ -316,16 +313,36 @@ impl IdevRecords {
         })
     }
 
-    fn activate<F>(&mut self, port: u16, init: F) -> Result<(), ActivateError>
-    where
-        F: FnOnce(IdevSkeleton) -> UnixImportedDevice,
-    {
-        let idev = self
+    fn activate(
+        &mut self,
+        port: u16,
+        dev_id: u32,
+        hub_speed: HubSpeed,
+        bus_id: &str,
+    ) -> Result<(), ActivateError> {
+        let _ = self
             .available_mut()
             .remove(&port)
-            .ok_or(ActivateError::PortNotAvailable)
-            .map(init)?;
-        self.active_mut().insert(idev.inner.port(), idev);
+            .ok_or(ActivateError::PortNotAvailable)?;
+        let udev = udev::Device::from_subsystem_sysname("usb".to_owned(), bus_id.to_owned())
+            .expect("Creating udev of an already attached device");
+        let usb_dev: crate::UsbDevice = udev
+            .try_into()
+            .expect("Converting valid udev into crate repr");
+        self.active_mut().insert(
+            port,
+            UnixImportedDevice {
+                base: base::ImportedDevice {
+                    port,
+                    status: DeviceStatus::PortInUse,
+                    vendor: usb_dev.id_vendor,
+                    product: usb_dev.id_product,
+                    devid: dev_id,
+                },
+                usb_dev,
+                hub: hub_speed,
+            },
+        );
 
         Ok(())
     }
@@ -351,7 +368,7 @@ impl FromIterator<MaybeIdev> for IdevRecords {
                 MaybeIdev::InUse(idev) => {
                     imported_devices
                         .active_mut()
-                        .insert(idev.inner.port(), idev);
+                        .insert(idev.base.port(), idev);
                 }
                 MaybeIdev::Empty(skel) => {
                     imported_devices.available_mut().insert(skel.port, skel);
@@ -406,27 +423,23 @@ impl crate::UsbDevice {
 }
 
 pub struct UnixDriver {
-    inner: DriverInner,
+    inner: InnerDriver,
 }
 
 impl UnixDriver {
     pub fn refresh_imported_devices(&mut self) -> crate::vhci::Result<()> {
         self.inner.refresh_imported_devices()
     }
-
-    pub fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ UnixImportedDevice> + '_ {
-        self.inner.imported_devices()
-    }
 }
 
-struct DriverInner {
+struct InnerDriver {
     hc_device: udev::Device,
     imported_devices: IdevRecords,
     num_controllers: NonZeroUsize,
     num_ports: NonZeroUsize,
 }
 
-impl DriverInner {
+impl InnerDriver {
     fn try_open() -> crate::vhci::Result<Self> {
         let hc_device = udev::Device::from_subsystem_sysname(BUS_TYPE.into(), DEVICE_NAME.into())?;
         let num_ports: NonZeroUsize = hc_device.parse_sysattr(Beef::Static("nports"))?;
@@ -522,23 +535,7 @@ impl DriverInner {
         }
 
         self.imported_devices
-            .activate(port, |_| {
-                let udev =
-                    udev::Device::from_subsystem_sysname("usb".to_owned(), bus_id.to_owned())
-                        .expect("Creating repr of device already attached");
-                let usb_dev: crate::UsbDevice = udev.try_into().unwrap();
-                UnixImportedDevice {
-                    inner: inner::ImportedDevice {
-                        port,
-                        status: DeviceStatus::PortInUse,
-                        vendor: usb_dev.id_vendor,
-                        product: usb_dev.id_product,
-                        devid: dev_id,
-                    },
-                    usb_dev,
-                    hub: device_speed.try_into().unwrap(),
-                }
-            })
+            .activate(port, dev_id, device_speed.try_into().unwrap(), bus_id)
             .expect("Port should've been open");
         Ok(port)
     }
@@ -554,7 +551,7 @@ pub struct AttachArgs<'a> {
 impl crate::vhci::VhciDriver for UnixDriver {
     fn open() -> crate::vhci::Result<Self> {
         Ok(Self {
-            inner: DriverInner::try_open()?,
+            inner: InnerDriver::try_open()?,
         })
     }
 
@@ -564,6 +561,10 @@ impl crate::vhci::VhciDriver for UnixDriver {
 
     fn attach(&mut self, args: AttachArgs) -> Result<u16, crate::vhci::error::AttachError> {
         self.inner.attach(args)
+    }
+
+    fn imported_devices(&self) -> impl ExactSizeIterator<Item = &'_ UnixImportedDevice> + '_ {
+        self.inner.imported_devices()
     }
 }
 
