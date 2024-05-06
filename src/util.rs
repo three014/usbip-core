@@ -1,4 +1,3 @@
-pub mod __padding;
 pub mod __private {
     pub trait Sealed {}
 }

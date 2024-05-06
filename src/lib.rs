@@ -57,7 +57,6 @@ use core::fmt;
 use std::{num::ParseIntError, path::Path, str::FromStr};
 
 use containers::stacktools::StackStr;
-use serde::{Deserialize, Serialize};
 
 pub use platform::USB_IDS;
 
@@ -169,13 +168,41 @@ impl FromStr for DeviceStatus {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy)]
 pub struct UsbInterface {
     b_interface_class: u8,
     b_interface_subclass: u8,
     b_interface_protocol: u8,
-    padding: util::__padding::Padding<u8>,
+}
+
+impl bincode::Encode for UsbInterface {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        bincode::Encode::encode(&self.b_interface_class, encoder)?;
+        bincode::Encode::encode(&self.b_interface_subclass, encoder)?;
+        bincode::Encode::encode(&self.b_interface_protocol, encoder)?;
+        bincode::Encode::encode(&0u8, encoder)?;
+        Ok(())
+    }
+}
+
+impl bincode::Decode for UsbInterface {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let b_interface_class = bincode::Decode::decode(decoder)?;
+        let b_interface_subclass = bincode::Decode::decode(decoder)?;
+        let b_interface_protocol = bincode::Decode::decode(decoder)?;
+        let _padding = bincode::Decode::decode(decoder)?;
+
+        Ok(UsbInterface {
+            b_interface_class,
+            b_interface_subclass,
+            b_interface_protocol,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bincode::Decode, bincode::Encode)]

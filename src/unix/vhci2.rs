@@ -115,13 +115,13 @@ impl FromStr for MaybeUnixImportedDevice {
         let idev = UnixImportedDevice {
             base: base::ImportedDevice {
                 port,
-                status,
                 vendor: usb_dev.id_vendor,
                 product: usb_dev.id_product,
                 devid,
             },
             hub,
             usb_dev,
+            status,
         };
 
         Ok(MaybeUnixImportedDevice(Some(idev)))
@@ -224,6 +224,7 @@ pub struct UnixImportedDevice {
     base: base::ImportedDevice,
     usb_dev: crate::UsbDevice,
     hub: HubSpeed,
+    status: crate::DeviceStatus,
 }
 
 impl UnixImportedDevice {
@@ -236,6 +237,10 @@ impl UnixImportedDevice {
 
     pub const fn hub(&self) -> HubSpeed {
         self.hub
+    }
+
+    fn status(&self) -> DeviceStatus {
+        self.status
     }
 }
 
@@ -254,7 +259,8 @@ struct UnixIdevDisplay<'a, 'b> {
 
 impl fmt::Display for UnixIdevDisplay<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let idev = &self.idev.base;
+        let idev_base = &self.idev.base;
+        let idev = &self.idev;
         let usb_dev = &self.idev.usb_dev;
         if idev.status() == DeviceStatus::PortInitializing
             || idev.status() == DeviceStatus::PortAvailable
@@ -262,19 +268,19 @@ impl fmt::Display for UnixIdevDisplay<'_, '_> {
             return write!(f, "");
         }
 
-        let record = PortRecord::read(idev.port()).inspect_err(|err| {
+        let record = PortRecord::read(idev_base.port()).inspect_err(|err| {
             writeln!(f, "Error when reading port record: {err}").unwrap();
         });
 
         writeln!(
             f,
             "Port {:02}: <{}> at {}",
-            idev.port(),
+            idev_base.port(),
             idev.status(),
             usb_dev.speed()
         )?;
 
-        let product = self.names.product_display(idev.vendor(), idev.product());
+        let product = self.names.product_display(idev_base.vendor(), idev_base.product());
         writeln!(f, "       {product}")?;
 
         match record {
@@ -539,7 +545,7 @@ impl crate::vhci::VhciDriver for UnixDriver {
         })
     }
 
-    fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
+    fn detach(&mut self, _port: u16) -> crate::vhci::Result<()> {
         todo!()
     }
 
