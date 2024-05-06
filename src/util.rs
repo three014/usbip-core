@@ -1,5 +1,4 @@
 pub mod __padding;
-pub mod serde_helpers;
 pub mod __private {
     pub trait Sealed {}
 }

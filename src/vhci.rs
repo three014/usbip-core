@@ -3,7 +3,7 @@ mod platform {
     #[cfg(unix)]
     pub use crate::unix::vhci2::{
         AttachArgs, PortRecord, UnixDriver as Driver, UnixImportedDevice as ImportedDevice,
-        STATE_PATH, UnixImportedDevices as ImportedDevices,
+        STATE_PATH,
     };
 
     #[cfg(windows)]
@@ -16,12 +16,11 @@ mod platform {
 pub mod base {
     use std::net::SocketAddr;
 
-    use crate::{containers::stacktools::StackStr, DeviceStatus, BUS_ID_SIZE};
+    use crate::{containers::stacktools::StackStr, BUS_ID_SIZE};
 
     #[derive(Debug)]
     pub struct ImportedDevice {
         pub(crate) port: u16,
-        pub(crate) status: DeviceStatus,
         pub(crate) vendor: u16,
         pub(crate) product: u16,
         pub(crate) devid: u32,
@@ -30,10 +29,6 @@ pub mod base {
     impl ImportedDevice {
         pub const fn port(&self) -> u16 {
             self.port
-        }
-
-        pub const fn status(&self) -> DeviceStatus {
-            self.status
         }
 
         pub const fn vendor(&self) -> u16 {

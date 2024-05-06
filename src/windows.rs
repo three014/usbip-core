@@ -5,30 +5,37 @@ use windows::Win32::{
 
 pub mod vhci {
     use std::{
-        ffi::{c_char, OsString}, fs::File, io::Read, marker::{PhantomData, PhantomPinned}, net::SocketAddr, os::windows::{
+        ffi::OsString,
+        fs::File,
+        net::SocketAddr,
+        os::windows::{
             ffi::OsStringExt,
             fs::OpenOptionsExt,
-            io::{AsHandle, AsRawHandle, BorrowedHandle},
-        }, path::PathBuf, pin::Pin, ptr::NonNull
+            io::{AsHandle, BorrowedHandle},
+        },
+        path::PathBuf,
     };
 
+    use bincode::error::DecodeError;
     use windows::{
         core::{GUID, PCWSTR},
         Win32::{
             Devices::DeviceAndDriverInstallation::CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
-            Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE, WIN32_ERROR},
             Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE},
-            System::IO::DeviceIoControl,
         },
     };
 
     use crate::{
-        ioctl_read,
+        containers::stacktools::StackStr,
         vhci::{base, VhciDriver},
         windows::vhci::utils::ioctl,
+        BUS_ID_SIZE,
     };
 
-    use self::utils::ioctl::DeviceType;
+    use self::utils::{
+        consts::{NI_MAXHOST, NI_MAXSERV},
+        ioctl::DeviceType,
+    };
 
     use super::Win32Error;
 
@@ -50,7 +57,6 @@ pub mod vhci {
 
     #[derive(Debug)]
     pub struct PortRecord {
-        port: i32,
         base: base::PortRecord,
     }
 
@@ -59,6 +65,29 @@ pub mod vhci {
         base: base::ImportedDevice,
         record: PortRecord,
         speed: crate::DeviceSpeed,
+    }
+
+    impl From<IoCtlIdev> for WindowsImportedDevice {
+        fn from(value: IoCtlIdev) -> Self {
+            Self {
+                base: base::ImportedDevice {
+                    port: value.port as u16,
+                    vendor: value.vendor,
+                    product: value.product,
+                    devid: value.devid,
+                },
+                record: PortRecord {
+                    base: base::PortRecord {
+                        busid: value.busid,
+                        host: SocketAddr::new(
+                            value.host.parse().unwrap(),
+                            value.service.parse().unwrap(),
+                        ),
+                    },
+                },
+                speed: value.speed,
+            }
+        }
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -76,12 +105,12 @@ pub mod vhci {
         }
     }
 
-    #[repr(C)]
+    #[derive(bincode::Decode, bincode::Encode)]
     struct IoCtlIdev {
         port: i32,
-        busid: [c_char; crate::BUS_ID_SIZE],
-        service: [c_char; 32],
-        host: [c_char; 1025],
+        busid: StackStr<BUS_ID_SIZE>,
+        service: StackStr<NI_MAXSERV>,
+        host: StackStr<NI_MAXHOST>,
         devid: u32,
         speed: crate::DeviceSpeed,
         vendor: u16,
@@ -106,10 +135,6 @@ pub mod vhci {
     }
 
     impl InnerDriver {
-        fn as_raw_handle(&self) -> HANDLE {
-            HANDLE(self.handle.as_raw_handle() as isize)
-        }
-
         fn as_handle(&self) -> BorrowedHandle {
             self.handle.as_handle()
         }
@@ -125,17 +150,18 @@ pub mod vhci {
             Ok(Self { handle: file })
         }
 
-        fn imported_devices(&self) -> std::io::Result<Box<[WindowsImportedDevice]>> {
-            let mut buf = Vec::<u8>::new();
+        fn imported_devices(
+            &self,
+        ) -> Result<Box<[WindowsImportedDevice]>, bincode::error::DecodeError> {
             let mut reader = ioctl::Reader::new(
                 self.as_handle(),
                 DeviceType::Unknown,
                 IoctlFunction::GetImportedDevices.as_u32(),
             );
 
-            reader.read_to_end(&mut buf)?;
-
-            todo!("Calculate number of idevs and cast safely")
+            let idevs: Vec<IoCtlIdev> =
+                bincode::decode_from_std_read(&mut reader, crate::net::bincode_config())?;
+            Ok(idevs.into_iter().map(From::from).collect())
         }
 
         fn path() -> crate::vhci::Result<PathBuf> {
@@ -179,7 +205,14 @@ pub mod vhci {
         }
 
         fn imported_devices(&self) -> crate::vhci::Result<WindowsImportedDevices> {
-            Ok(self.inner.imported_devices().map(WindowsImportedDevices)?)
+            Ok(self
+                .inner
+                .imported_devices()
+                .map(WindowsImportedDevices)
+                .map_err(|err| match err {
+                    DecodeError::Io { inner, .. } => inner,
+                    _ => std::io::Error::other(err),
+                })?)
         }
     }
 

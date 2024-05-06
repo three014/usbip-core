@@ -2,8 +2,8 @@ use std::io::Read;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 
 use bitflags::bitflags;
-use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, HANDLE, WIN32_ERROR};
-use windows::Win32::Storage::FileSystem::{FILE_ACCESS_RIGHTS, FILE_READ_DATA, FILE_WRITE_DATA};
+use windows::Win32::Foundation::{ERROR_MORE_DATA, HANDLE, WIN32_ERROR};
+use windows::Win32::Storage::FileSystem::{FILE_READ_DATA, FILE_WRITE_DATA};
 use windows::Win32::System::Ioctl::{
     FILE_ANY_ACCESS, METHOD_BUFFERED, METHOD_IN_DIRECT, METHOD_NEITHER, METHOD_OUT_DIRECT,
 };
@@ -22,7 +22,7 @@ impl<'a> Reader<'a> {
             handle,
             dev_type,
             ctl_read_num,
-            end_of_req: false
+            end_of_req: false,
         }
     }
 }
@@ -67,70 +67,6 @@ impl<'a> Read for Reader<'a> {
             Ok(bytes_returned.try_into().unwrap())
         }
     }
-}
-
-#[repr(u32)]
-enum Method {
-    Buffered = METHOD_BUFFERED,
-}
-
-const fn ctl_code(
-    dev_type: DeviceType,
-    function: u32,
-    method: Method,
-    access: FILE_ACCESS_RIGHTS,
-) -> u32 {
-    // Taken from CTL_CODE macro from d4drvif.h
-    ((dev_type as u32) << 16) | ((access.0) << 14) | ((function) << 2) | (method as u32)
-}
-
-const fn make(pre_function: PreFunction) -> u32 {
-    ctl_code(
-        DeviceType::Unknown,
-        pre_function as u32,
-        Method::Buffered,
-        FILE_ACCESS_RIGHTS(FILE_READ_DATA.0 | FILE_WRITE_DATA.0),
-    )
-}
-
-#[repr(u32)]
-enum PreFunction {
-    PluginHardware = 0x800,
-    PlugoutHardware,
-    GetImportedDevices,
-    SetPersistent,
-    GetPersistent,
-}
-
-pub struct PluginHardware {}
-
-impl PluginHardware {
-    pub const FUNCTION: u32 = make(PreFunction::PluginHardware);
-}
-
-pub struct PlugoutHardware {}
-
-impl PlugoutHardware {
-    pub const FUNCTION: u32 = make(PreFunction::PlugoutHardware);
-}
-
-#[repr(C)]
-pub struct GetImportedDevices {}
-
-impl GetImportedDevices {
-    pub const FUNCTION: u32 = make(PreFunction::GetImportedDevices);
-}
-
-pub struct SetPersistent;
-
-impl SetPersistent {
-    pub const FUNCTION: u32 = make(PreFunction::SetPersistent);
-}
-
-pub struct GetPersistent;
-
-impl GetPersistent {
-    pub const FUNCTION: u32 = make(PreFunction::GetPersistent);
 }
 
 #[allow(dead_code)]
@@ -464,133 +400,5 @@ impl From<u32> for ControlCode {
 impl Into<u32> for ControlCode {
     fn into(self) -> u32 {
         self.into_u32()
-    }
-}
-
-#[macro_export]
-macro_rules! ioctl_none {
-    ($(#[$attr:meta])* $name:ident, $dev_ty:expr, $nr:expr) => {
-        $(#[$attr])*
-        pub unsafe fn $name(handle: *mut std::ffi::c_void) -> Result<u32, $crate::Error> {
-            let code = $crate::ControlCode(
-                $dev_ty,
-                $crate::RequiredAccess::ANY_ACCESS,
-                $nr,
-                $crate::TransferMethod::Neither,
-            ).into();
-            let mut return_value = 0;
-
-            let status = $crate::DeviceIoControl(
-                handle as _,
-                code,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                0,
-                &mut return_value,
-                std::ptr::null_mut(),
-            ) != 0;
-
-            match status {
-                true => Ok(return_value),
-                _ => Err(std::io::Error::last_os_error())?,
-            }
-        }
-    }
-}
-
-#[macro_export]
-macro_rules! ioctl_read {
-    ($(#[$attr:meta])* $name:ident, $dev_ty:expr, $nr:expr, $ty:ty) => {
-        $(#[$attr])*
-        pub unsafe fn $name(handle: *mut std::ffi::c_void, data: *mut $ty) -> Result<u32, $crate::Error> {
-            let code = $crate::ControlCode(
-                $dev_ty,
-                $crate::RequiredAccess::READ_DATA,
-                $nr,
-                $crate::TransferMethod::Buffered,
-            ).into();
-            let mut return_value = 0;
-
-            let status = $crate::DeviceIoControl(
-                handle as _,
-                code,
-                data as _,
-                std::mem::size_of::<$ty>() as _,
-                data as _,
-                std::mem::size_of::<$ty>() as _,
-                &mut return_value,
-                std::ptr::null_mut(),
-            ) != 0;
-
-            match status {
-                true => Ok(return_value),
-                _ => Err(std::io::Error::last_os_error())?,
-            }
-        }
-    }
-}
-
-#[macro_export]
-macro_rules! ioctl_write {
-    ($(#[$attr:meta])* $name:ident, $dev_ty:expr, $nr:expr, $ty:ty) => {
-        $(#[$attr])*
-        pub unsafe fn $name(handle: *mut std::ffi::c_void, data: *const $ty) -> Result<u32, $crate::Error> {
-            let code = $crate::ControlCode(
-                $dev_ty,
-                $crate::RequiredAccess::WRITE_DATA,
-                $nr,
-                $crate::TransferMethod::Buffered,
-            ).into();
-            let mut return_value = 0;
-
-            let status = $crate::DeviceIoControl(
-                handle as _,
-                code,
-                data as _,
-                std::mem::size_of::<$ty>() as _,
-                std::ptr::null_mut(),
-                0,
-                &mut return_value,
-                std::ptr::null_mut(),
-            ) != 0;
-
-            match status {
-                true => Ok(return_value),
-                _ => Err(std::io::Error::last_os_error())?,
-            }
-        }
-    }
-}
-
-#[macro_export]
-macro_rules! ioctl_readwrite {
-    ($(#[$attr:meta])* $name:ident, $dev_ty:expr, $nr:expr, $ty:ty) => {
-        $(#[$attr])*
-        pub unsafe fn $name(handle: *mut std::ffi::c_void, data: *mut $ty) -> Result<u32, $crate::Error> {
-            let code = $crate::ControlCode(
-                $dev_ty,
-                $crate::RequiredAccess::READ_WRITE_DATA,
-                $nr,
-                $crate::TransferMethod::Buffered,
-            ).into();
-            let mut return_value = 0;
-
-            let status = $crate::DeviceIoControl(
-                handle as _,
-                code,
-                data as _,
-                std::mem::size_of::<$ty>() as _,
-                data as _,
-                std::mem::size_of::<$ty>() as _,
-                &mut return_value,
-                std::ptr::null_mut(),
-            ) != 0;
-
-            match status {
-                true => Ok(return_value),
-                _ => Err(std::io::Error::last_os_error())?,
-            }
-        }
     }
 }

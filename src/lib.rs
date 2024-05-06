@@ -18,9 +18,10 @@ pub mod containers {
 mod util;
 pub mod net {
     use core::fmt;
-    use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    use bincode::config::{BigEndian, Configuration, Fixint};
+
+    #[derive(Debug, Clone, Copy, bincode::Encode, bincode::Decode)]
     #[repr(u32)]
     pub enum Status {
         Success = 0x00,
@@ -43,6 +44,13 @@ pub mod net {
             }
         }
     }
+
+    pub const fn bincode_config() -> Configuration<BigEndian, Fixint> {
+        bincode::config::standard()
+            .with_no_limit()
+            .with_big_endian()
+            .with_fixed_int_encoding()
+    }
 }
 
 use core::fmt;
@@ -57,8 +65,7 @@ pub const USBIP_VERSION: usize = 0x111;
 pub const DEV_PATH_MAX: usize = 256;
 pub const BUS_ID_SIZE: usize = 32;
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, bincode::Encode, bincode::Decode)]
 pub struct UsbDevice {
     path: StackStr<DEV_PATH_MAX>,
     busid: StackStr<BUS_ID_SIZE>,
@@ -171,7 +178,7 @@ pub struct UsbInterface {
     padding: util::__padding::Padding<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bincode::Decode, bincode::Encode)]
 #[repr(u32)]
 pub enum DeviceSpeed {
     Unknown = 0,
@@ -234,5 +241,18 @@ impl From<u32> for DeviceSpeed {
             10000 => Self::SuperPlus,
             _ => Self::Unknown,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_speed_sizeof_i32() {
+        assert_eq!(
+            std::mem::size_of::<DeviceSpeed>(),
+            std::mem::size_of::<i32>()
+        );
     }
 }

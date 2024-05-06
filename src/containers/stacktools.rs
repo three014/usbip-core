@@ -7,13 +7,10 @@ use std::{
     str::Utf8Error,
 };
 
-use serde::{de::Error, Deserialize, Deserializer, Serialize};
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct StackStr<const N: usize> {
-    #[serde(skip_serializing)]
     len: usize,
-    #[serde(with = "crate::util::serde_helpers")]
     buf: [c_char; N],
 }
 
@@ -111,23 +108,48 @@ impl<const N: usize> Write for StackStr<N> {
     }
 }
 
-impl<'de, const N: usize> Deserialize<'de> for StackStr<N> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let buf: [c_char; N] = crate::util::serde_helpers::deserialize(deserializer)?;
-        let u8_buf = crate::util::cast_cchar_to_u8(&buf);
-        std::str::from_utf8(u8_buf).map_err(D::Error::custom)?;
-        let len = buf
-            .as_slice()
-            .strip_suffix(&[0 as c_char])
-            .unwrap_or(buf.as_slice())
-            .len();
+impl<const N: usize> bincode::Decode for StackStr<N> {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let (buf, len) = decode_and_validate(decoder)?;
 
         // SAFETY: The entire array was checked to be a valid UTF-8 string,
         //         and the length was correctly calculated.
         Ok(unsafe { Self::from_raw_parts(buf, len) })
+    }
+}
+
+impl<'de, const N: usize> bincode::BorrowDecode<'de> for StackStr<N> {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let (buf, len) = decode_and_validate(decoder)?;
+
+        // SAFETY: The entire array was checked to be a valid UTF-8 string,
+        //         and the length was correctly calculated.
+        Ok(unsafe { Self::from_raw_parts(buf, len) })
+    }
+}
+
+fn decode_and_validate<D: bincode::de::Decoder, const N: usize>(
+    decoder: &mut D,
+) -> Result<([c_char; N], usize), bincode::error::DecodeError> {
+    let buf: [c_char; N] = bincode::Decode::decode(decoder)?;
+    let u8_buf = crate::util::cast_cchar_to_u8(&buf);
+    std::str::from_utf8(u8_buf).map_err(|err| bincode::error::DecodeError::Utf8 { inner: err })?;
+    let len = buf
+        .as_slice()
+        .strip_prefix(&[0 as c_char])
+        .unwrap_or(buf.as_slice())
+        .len();
+
+    Ok((buf, len))
+}
+
+impl<const N: usize> bincode::Encode for StackStr<N> {
+    fn encode<E: bincode::enc::Encoder>(&self, encoder: &mut E) -> Result<(), bincode::error::EncodeError> {
+        bincode::Encode::encode(&self.buf, encoder)
     }
 }
 
