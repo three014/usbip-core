@@ -4,142 +4,12 @@ use windows::Win32::{
 };
 
 pub mod vhci {
-    mod utils {
-        pub mod ioctl {
-            use windows::Win32::Storage::FileSystem::{
-                FILE_ACCESS_RIGHTS, FILE_READ_DATA, FILE_WRITE_DATA,
-            };
-
-            #[repr(u32)]
-            enum DeviceType {
-                Unknown = ::windows::Win32::System::Ioctl::FILE_DEVICE_UNKNOWN,
-            }
-
-            #[repr(u32)]
-            enum Method {
-                Buffered = ::windows::Win32::System::Ioctl::METHOD_BUFFERED,
-            }
-
-            const fn ctl_code(
-                dev_type: DeviceType,
-                function: u32,
-                method: Method,
-                access: FILE_ACCESS_RIGHTS,
-            ) -> u32 {
-                // Taken from CTL_CODE macro from d4drvif.h
-                ((dev_type as u32) << 16) | ((access.0) << 14) | ((function) << 2) | (method as u32)
-            }
-
-            const fn make(pre_function: PreFunction) -> u32 {
-                ctl_code(
-                    DeviceType::Unknown,
-                    pre_function as u32,
-                    Method::Buffered,
-                    FILE_ACCESS_RIGHTS(FILE_READ_DATA.0 | FILE_WRITE_DATA.0),
-                )
-            }
-
-            #[repr(u32)]
-            enum PreFunction {
-                PluginHardware = 0x800,
-                PlugoutHardware,
-                GetImportedDevices,
-                SetPersistent,
-                GetPersistent,
-            }
-
-            pub struct PluginHardware {}
-
-            impl PluginHardware {
-                pub const FUNCTION: u32 = make(PreFunction::PluginHardware);
-            }
-
-            pub struct PlugoutHardware {}
-
-            impl PlugoutHardware {
-                pub const FUNCTION: u32 = make(PreFunction::PlugoutHardware);
-            }
-
-            #[repr(C)]
-            pub struct GetImportedDevices {}
-
-            impl GetImportedDevices {
-                pub const FUNCTION: u32 = make(PreFunction::GetImportedDevices);
-            }
-
-            pub struct SetPersistent;
-
-            impl SetPersistent {
-                pub const FUNCTION: u32 = make(PreFunction::SetPersistent);
-            }
-
-            pub struct GetPersistent;
-
-            impl GetPersistent {
-                pub const FUNCTION: u32 = make(PreFunction::GetPersistent);
-            }
-        }
-        use windows::{
-            core::{GUID, PCWSTR},
-            Win32::{
-                Devices::DeviceAndDriverInstallation::{
-                    CM_Get_Device_Interface_ListW, CM_Get_Device_Interface_List_SizeW,
-                    CM_GET_DEVICE_INTERFACE_LIST_FLAGS, CR_BUFFER_SMALL, CR_SUCCESS,
-                },
-                Foundation::{ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY},
-            },
-        };
-
-        use super::Win32Error;
-
-        pub fn get_device_interface_list<P>(
-            guid: GUID,
-            pdeviceid: P,
-            flags: CM_GET_DEVICE_INTERFACE_LIST_FLAGS,
-        ) -> Result<Vec<u16>, Win32Error>
-        where
-            P: ::windows::core::IntoParam<PCWSTR> + Copy,
-        {
-            let mut v = Vec::<u16>::new();
-            loop {
-                let mut cch = 0;
-                let ret = unsafe {
-                    CM_Get_Device_Interface_List_SizeW(
-                        std::ptr::addr_of_mut!(cch),
-                        std::ptr::addr_of!(guid),
-                        pdeviceid,
-                        flags,
-                    )
-                };
-                if ret != CR_SUCCESS {
-                    break Err(Win32Error::from_cmret(ret, ERROR_INVALID_PARAMETER));
-                }
-
-                v.resize(cch as usize, 0);
-
-                let ret = unsafe {
-                    CM_Get_Device_Interface_ListW(
-                        std::ptr::addr_of!(guid),
-                        pdeviceid,
-                        &mut v,
-                        flags,
-                    )
-                };
-                match ret {
-                    CR_BUFFER_SMALL => continue,
-                    CR_SUCCESS => break Ok(v),
-                    err => break Err(Win32Error::from_cmret(err, ERROR_NOT_ENOUGH_MEMORY)),
-                }
-            }
-        }
-    }
     use std::{
-        ffi::{c_char, OsString},
-        fs::File,
-        marker::{PhantomData, PhantomPinned},
-        net::SocketAddr,
-        os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle},
-        path::PathBuf, pin::Pin, ptr::NonNull,
+        ffi::{c_char, OsString}, fs::File, io::Read, marker::{PhantomData, PhantomPinned}, net::SocketAddr, os::windows::{
+            ffi::OsStringExt,
+            fs::OpenOptionsExt,
+            io::{AsHandle, AsRawHandle, BorrowedHandle},
+        }, path::PathBuf, pin::Pin, ptr::NonNull
     };
 
     use windows::{
@@ -153,11 +23,16 @@ pub mod vhci {
     };
 
     use crate::{
+        ioctl_read,
         vhci::{base, VhciDriver},
         windows::vhci::utils::ioctl,
     };
 
+    use self::utils::ioctl::DeviceType;
+
     use super::Win32Error;
+
+    mod utils;
 
     pub static STATE_PATH: &str = "";
     const GUID_DEVINTERFACE_USB_HOST_CONTROLLER: GUID = GUID::from_values(
@@ -184,6 +59,21 @@ pub mod vhci {
         base: base::ImportedDevice,
         record: PortRecord,
         speed: crate::DeviceSpeed,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum IoctlFunction {
+        PluginHardware = 0x800,
+        PlugoutHardware,
+        GetImportedDevices,
+        SetPersistent,
+        GetPersistent,
+    }
+
+    impl IoctlFunction {
+        const fn as_u32(&self) -> u32 {
+            *self as u32
+        }
     }
 
     #[repr(C)]
@@ -220,6 +110,10 @@ pub mod vhci {
             HANDLE(self.handle.as_raw_handle() as isize)
         }
 
+        fn as_handle(&self) -> BorrowedHandle {
+            self.handle.as_handle()
+        }
+
         fn try_open() -> crate::vhci::Result<Self> {
             let file = File::options()
                 .create(true)
@@ -231,37 +125,15 @@ pub mod vhci {
             Ok(Self { handle: file })
         }
 
-        fn imported_devices(&self) -> ::windows::core::Result<Box<[WindowsImportedDevice]>> {
-            let mut result = Vec::<IoCtlIdev>::new();
-            let mut additional = 4;
+        fn imported_devices(&self) -> std::io::Result<Box<[WindowsImportedDevice]>> {
+            let mut buf = Vec::<u8>::new();
+            let mut reader = ioctl::Reader::new(
+                self.as_handle(),
+                DeviceType::Unknown,
+                IoctlFunction::GetImportedDevices.as_u32(),
+            );
 
-            loop {
-                result.reserve(additional);
-                let result_size = result.capacity() * std::mem::size_of::<IoCtlIdev>();
-                let mut bytes_returned = 0;
-
-                if let Err(err) = unsafe {
-                    DeviceIoControl(
-                        self.as_raw_handle(),
-                        ioctl::GetImportedDevices::FUNCTION,
-                        None,
-                        0,
-                        Some(result.as_mut_ptr().cast()),
-                        result_size.try_into().unwrap(),
-                        Some(std::ptr::addr_of_mut!(bytes_returned)),
-                        None,
-                    )
-                } {
-                    match WIN32_ERROR::from_error(&err)
-                        .expect("Unwrapping error from DeviceIoControl")
-                    {
-                        ERROR_INSUFFICIENT_BUFFER => {
-                            additional <<= 1;
-                        }
-                        _ => Err(err)?,
-                    }
-                }
-            }
+            reader.read_to_end(&mut buf)?;
 
             todo!("Calculate number of idevs and cast safely")
         }
