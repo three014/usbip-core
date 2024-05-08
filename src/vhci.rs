@@ -75,8 +75,6 @@ use std::str::FromStr;
 pub use error::Error;
 pub use platform::{AttachArgs, Driver, ImportedDevice, ImportedDevices, PortRecord, STATE_PATH};
 
-use crate::util::__private::Sealed;
-
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,9 +222,3 @@ impl VhciDriver2 {
     }
 }
 
-pub trait VhciDriver: Sized + Sealed {
-    fn open() -> Result<Self>;
-    fn attach(&mut self, args: AttachArgs) -> std::result::Result<u16, error::AttachError>;
-    fn detach(&mut self, port: u16) -> Result<()>;
-    fn imported_devices(&self) -> Result<ImportedDevices>;
-}

@@ -5,7 +5,7 @@ use windows::Win32::{
 
 pub mod vhci {
     use std::{
-        ffi::{c_char, OsString}, fs::File, io::Read, net::{SocketAddr, ToSocketAddrs}, ops::Deref, os::windows::{
+        ffi::OsString, fs::File, io::Read, net::{SocketAddr, ToSocketAddrs}, ops::Deref, os::windows::{
             ffi::OsStringExt,
             fs::OpenOptionsExt,
             io::{AsHandle, BorrowedHandle},
@@ -22,10 +22,8 @@ pub mod vhci {
     };
 
     use crate::{
-        containers::stacktools::StackStr,
-        vhci::{base, VhciDriver},
+        vhci::base,
         windows::vhci::utils::ioctl,
-        BUS_ID_SIZE,
     };
 
     use super::Win32Error;
@@ -178,22 +176,23 @@ pub mod vhci {
         inner: InnerDriver,
     }
 
-    impl VhciDriver for WindowsVhciDriver {
-        fn open() -> crate::vhci::Result<Self> {
+    impl WindowsVhciDriver {
+        #[inline(always)]
+        pub fn open() -> crate::vhci::Result<Self> {
             Ok(Self {
                 inner: InnerDriver::try_open()?,
             })
         }
 
-        fn attach(&mut self, args: AttachArgs) -> Result<u16, crate::vhci::error::AttachError> {
+        pub fn attach(&mut self, args: AttachArgs) -> Result<u16, crate::vhci::error::AttachError> {
             todo!()
         }
 
-        fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
+        pub fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
             todo!()
         }
 
-        fn imported_devices(&self) -> crate::vhci::Result<WindowsImportedDevices> {
+        pub fn imported_devices(&self) -> crate::vhci::Result<WindowsImportedDevices> {
             Ok(self.inner.imported_devices().map_err(|err| match err {
                 DecodeError::Io { inner, .. } => inner,
                 _ => std::io::Error::other(err),
@@ -206,8 +205,6 @@ pub mod vhci {
             Self::Windows(value.into())
         }
     }
-
-    impl crate::util::__private::Sealed for WindowsVhciDriver {}
 
     #[cfg(test)]
     mod tests {
