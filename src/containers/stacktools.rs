@@ -15,6 +15,7 @@ pub struct StackStr<const N: usize> {
 }
 
 impl<const N: usize> StackStr<N> {
+    #[inline]
     pub const fn new() -> Self {
         Self {
             len: 0,
@@ -22,6 +23,7 @@ impl<const N: usize> StackStr<N> {
         }
     }
 
+    #[inline(always)]
     pub const fn len(&self) -> usize {
         self.len
     }
@@ -41,6 +43,7 @@ impl<const N: usize> StackStr<N> {
         self.len = 0;
     }
 
+    #[inline(always)]
     pub const unsafe fn from_raw_parts(buf: [c_char; N], len: usize) -> Self {
         Self { buf, len }
     }
@@ -132,23 +135,27 @@ impl<'de, const N: usize> bincode::BorrowDecode<'de> for StackStr<N> {
     }
 }
 
+#[inline(always)]
 fn decode_and_validate<D: bincode::de::Decoder, const N: usize>(
     decoder: &mut D,
 ) -> Result<([c_char; N], usize), bincode::error::DecodeError> {
     let buf: [c_char; N] = bincode::Decode::decode(decoder)?;
-    let u8_buf = crate::util::cast_cchar_to_u8(&buf);
-    std::str::from_utf8(u8_buf).map_err(|err| bincode::error::DecodeError::Utf8 { inner: err })?;
-    let len = buf
-        .as_slice()
-        .strip_prefix(&[0 as c_char])
-        .unwrap_or(buf.as_slice())
+
+    let u8_buf = crate::util::cast_cchar_to_u8(&buf[0..N]);
+    let len = std::str::from_utf8(u8_buf)
+        .map_err(|err| bincode::error::DecodeError::Utf8 { inner: err })?
+        .trim_start_matches(char::from(0u8))
+        .trim_end_matches(char::from(0u8))
         .len();
 
     Ok((buf, len))
 }
 
 impl<const N: usize> bincode::Encode for StackStr<N> {
-    fn encode<E: bincode::enc::Encoder>(&self, encoder: &mut E) -> Result<(), bincode::error::EncodeError> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
         bincode::Encode::encode(&self.buf, encoder)
     }
 }

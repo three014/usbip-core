@@ -1,71 +1,229 @@
+use std::ffi::c_char;
 use std::io::Read;
+use std::num::NonZeroU32;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 
 use bitflags::bitflags;
-use windows::Win32::Foundation::{ERROR_MORE_DATA, HANDLE, WIN32_ERROR};
+use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, HANDLE, WIN32_ERROR};
 use windows::Win32::Storage::FileSystem::{FILE_READ_DATA, FILE_WRITE_DATA};
 use windows::Win32::System::Ioctl::{
     FILE_ANY_ACCESS, METHOD_BUFFERED, METHOD_IN_DIRECT, METHOD_NEITHER, METHOD_OUT_DIRECT,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
-pub struct Reader<'a> {
-    handle: BorrowedHandle<'a>,
-    dev_type: DeviceType,
-    ctl_read_num: u32,
+use crate::containers::stacktools::StackStr;
+use crate::{DeviceSpeed, BUS_ID_SIZE};
+
+use super::consts::{NI_MAXHOST, NI_MAXSERV};
+
+#[derive(Debug, Clone, Copy)]
+pub enum Function {
+    PluginHardware = 0x800,
+    PlugoutHardware,
+    GetImportedDevices,
+    SetPersistent,
+    GetPersistent,
+}
+
+impl Function {
+    pub const fn as_u32(&self) -> u32 {
+        *self as u32
+    }
+}
+
+#[derive(bincode::Encode)]
+pub struct ImportedDevice {
+    pub port: i32,
+    pub busid: StackStr<BUS_ID_SIZE>,
+    pub service: StackStr<NI_MAXSERV>,
+    pub host: StackStr<NI_MAXHOST>,
+    pub devid: u32,
+    pub speed: crate::DeviceSpeed,
+    pub vendor: u16,
+    pub product: u16,
+}
+
+impl ImportedDevice {
+    #[inline]
+    pub const fn encoded_size_of() -> usize {
+        #[repr(C)]
+        struct EncodedImportedDevice {
+            port: i32,
+            busid: [c_char; BUS_ID_SIZE],
+            service: [c_char; NI_MAXSERV],
+            host: [c_char; NI_MAXHOST],
+            devid: u32,
+            speed: crate::DeviceSpeed,
+            vendor: u16,
+            product: u16,
+        }
+
+        core::mem::size_of::<EncodedImportedDevice>()
+    }
+}
+
+impl bincode::Decode for ImportedDevice {
+    fn decode<D: bincode::de::Decoder>(decoder: &mut D) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::de::read::Reader as _;
+        let port = i32::decode(decoder)?;
+        let busid = StackStr::decode(decoder)?;
+        let service = StackStr::decode(decoder)?;
+        let host = StackStr::decode(decoder)?;
+        decoder.claim_bytes_read(3)?;
+        decoder.reader().consume(3);
+        let devid = u32::decode(decoder)?;
+        let speed = DeviceSpeed::decode(decoder)?;
+        let vendor = u16::decode(decoder)?;
+        let product = u16::decode(decoder)?;
+
+        Ok(Self {
+            port,
+            busid,
+            service,
+            host,
+            devid,
+            speed,
+            vendor,
+            product,
+        })
+    }
+}
+
+pub struct Reader<'handle, const ENCODED_SIZE_OF_DATA: usize> {
+    handle: BorrowedHandle<'handle>,
+    ctl_code: u32,
     end_of_req: bool,
 }
 
-impl<'a> Reader<'a> {
-    pub const fn new(handle: BorrowedHandle<'a>, dev_type: DeviceType, ctl_read_num: u32) -> Self {
+impl<'handle, const ENCODED_SIZE_OF_DATA: usize> Reader<'handle, ENCODED_SIZE_OF_DATA> {
+    pub const fn new(
+        handle: BorrowedHandle<'handle>,
+        dev_type: DeviceType,
+        ctl_read_num: u32,
+    ) -> Self {
         Self {
             handle,
-            dev_type,
-            ctl_read_num,
+            ctl_code: ControlCode(
+                dev_type,
+                RequiredAccess::READ_WRITE_DATA,
+                ctl_read_num,
+                TransferMethod::Buffered,
+            )
+            .into_u32(),
             end_of_req: false,
         }
     }
 }
 
-impl<'a> Read for Reader<'a> {
+impl<'handle, const ENCODED_SIZE_OF_DATA: usize> Read for Reader<'handle, ENCODED_SIZE_OF_DATA> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.end_of_req {
             return Ok(0);
         }
 
-        let code = ControlCode(
-            self.dev_type,
-            RequiredAccess::READ_DATA,
-            self.ctl_read_num,
-            TransferMethod::Buffered,
-        )
-        .into_u32();
+        let encoded_size_of_data = ENCODED_SIZE_OF_DATA as u32;
+        let size_of_u32 = core::mem::size_of::<u32>() as u32;
+        let code = self.ctl_code;
         let handle = HANDLE(self.handle.as_raw_handle() as isize);
+        let buf_len = (encoded_size_of_data + size_of_u32).to_ne_bytes();
         let mut bytes_returned = 0;
 
         // SAFETY: `buf` is a valid mutable slice
-        if let Err(err) = unsafe {
+        let result = unsafe {
             DeviceIoControl(
                 handle,
                 code,
-                Some(buf.as_ptr().cast()),
-                buf.len().try_into().unwrap(),
+                Some(buf_len.as_ptr().cast()),
+                buf_len.len().try_into().unwrap(),
                 Some(buf.as_mut_ptr().cast()),
                 buf.len().try_into().unwrap(),
                 Some(std::ptr::addr_of_mut!(bytes_returned)),
                 None,
             )
-        } {
+        };
+
+        if let Err(err) = result {
+            if bytes_returned < size_of_u32 {
+                return Err(std::io::Error::other(
+                    "Unexpected response from the usbip driver",
+                ));
+            }
             let win32_err =
                 WIN32_ERROR::from_error(&err).expect("Converting error from DeviceIoControl");
             match win32_err {
                 ERROR_MORE_DATA => Ok(bytes_returned.try_into().unwrap()),
+                ERROR_INSUFFICIENT_BUFFER => {
+                    Err(std::io::Error::from_raw_os_error(win32_err.0 as i32))
+                }
                 _ => Err(std::io::Error::last_os_error()),
             }
         } else {
             self.end_of_req = true;
             Ok(bytes_returned.try_into().unwrap())
         }
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+        struct BitShiftLeft {
+            mask: NonZeroU32,
+            num: usize,
+        }
+
+        impl BitShiftLeft {
+            const fn new(mask: NonZeroU32, num: usize) -> Self {
+                Self { mask, num }
+            }
+        }
+
+        impl Iterator for BitShiftLeft {
+            type Item = usize;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let next = self.num;
+                self.num = self.num.checked_shl(self.mask.get())?;
+                Some(next)
+            }
+        }
+
+        let size_of_u32 = core::mem::size_of::<u32>();
+        let encoded_size_of_data = ENCODED_SIZE_OF_DATA;
+
+        let mut start = 0;
+
+        for num_ioctl_devs in BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 4) {
+            buf.resize(
+                (encoded_size_of_data)
+                    .checked_mul(num_ioctl_devs)
+                    .unwrap()
+                    .checked_add(core::mem::size_of::<u32>())
+                    .unwrap(),
+                0,
+            );
+
+            match self.read(&mut buf[start..]) {
+                Ok(0) => {
+                    buf.resize(start, 0);
+                    break;
+                }
+                Ok(bytes_read) => {
+                    start += bytes_read;
+                }
+                Err(err) => {
+                    if let Some(raw_err) = err.raw_os_error() {
+                        if raw_err != (ERROR_INSUFFICIENT_BUFFER.0 as i32) {
+                            return Err(err);
+                        }
+                        // Otherwise we keep going but with a larger buffer next time
+                    }
+                }
+            }
+        }
+
+        let num_ioctl_devs =
+            ((buf.len() - size_of_u32) / encoded_size_of_data) as u32;
+        buf[0..size_of_u32].copy_from_slice(&num_ioctl_devs.to_le_bytes());
+
+        Ok(buf.len())
     }
 }
 

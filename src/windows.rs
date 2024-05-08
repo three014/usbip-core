@@ -5,15 +5,11 @@ use windows::Win32::{
 
 pub mod vhci {
     use std::{
-        ffi::OsString,
-        fs::File,
-        net::SocketAddr,
-        os::windows::{
+        ffi::{c_char, OsString}, fs::File, io::Read, net::{SocketAddr, ToSocketAddrs}, ops::Deref, os::windows::{
             ffi::OsStringExt,
             fs::OpenOptionsExt,
             io::{AsHandle, BorrowedHandle},
-        },
-        path::PathBuf,
+        }, path::PathBuf
     };
 
     use bincode::error::DecodeError;
@@ -30,11 +26,6 @@ pub mod vhci {
         vhci::{base, VhciDriver},
         windows::vhci::utils::ioctl,
         BUS_ID_SIZE,
-    };
-
-    use self::utils::{
-        consts::{NI_MAXHOST, NI_MAXSERV},
-        ioctl::DeviceType,
     };
 
     use super::Win32Error;
@@ -67,8 +58,9 @@ pub mod vhci {
         speed: crate::DeviceSpeed,
     }
 
-    impl From<IoCtlIdev> for WindowsImportedDevice {
-        fn from(value: IoCtlIdev) -> Self {
+    impl From<ioctl::ImportedDevice> for WindowsImportedDevice {
+        fn from(value: ioctl::ImportedDevice) -> Self {
+            let host = (value.host.deref(), value.service.parse().unwrap());
             Self {
                 base: base::ImportedDevice {
                     port: value.port as u16,
@@ -79,42 +71,12 @@ pub mod vhci {
                 record: PortRecord {
                     base: base::PortRecord {
                         busid: value.busid,
-                        host: SocketAddr::new(
-                            value.host.parse().unwrap(),
-                            value.service.parse().unwrap(),
-                        ),
+                        host: host.to_socket_addrs().unwrap().next().unwrap(),
                     },
                 },
                 speed: value.speed,
             }
         }
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    enum IoctlFunction {
-        PluginHardware = 0x800,
-        PlugoutHardware,
-        GetImportedDevices,
-        SetPersistent,
-        GetPersistent,
-    }
-
-    impl IoctlFunction {
-        const fn as_u32(&self) -> u32 {
-            *self as u32
-        }
-    }
-
-    #[derive(bincode::Decode, bincode::Encode)]
-    struct IoCtlIdev {
-        port: i32,
-        busid: StackStr<BUS_ID_SIZE>,
-        service: StackStr<NI_MAXSERV>,
-        host: StackStr<NI_MAXHOST>,
-        devid: u32,
-        speed: crate::DeviceSpeed,
-        vendor: u16,
-        product: u16,
     }
 
     #[derive(Debug)]
@@ -127,6 +89,27 @@ pub mod vhci {
 
         pub fn get(&self) -> &[WindowsImportedDevice] {
             &self.0
+        }
+    }
+
+    impl bincode::Decode for WindowsImportedDevices {
+        fn decode<D: bincode::de::Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
+            let len = u32::decode(decoder)? as usize;
+
+            // We use a byte array that's the same size as the
+            // encoded struct to not leak the struct definition
+            decoder.claim_container_read::<[u8; ioctl::ImportedDevice::encoded_size_of()]>(len)?;
+
+            let mut vec = Vec::with_capacity(len);
+            for _ in 0..len {
+                decoder.unclaim_bytes_read(ioctl::ImportedDevice::encoded_size_of());
+
+                let ioctldev = ioctl::ImportedDevice::decode(decoder)?;
+                let imported_device = WindowsImportedDevice::from(ioctldev);
+                vec.push(imported_device);
+            }
+
+            Ok(WindowsImportedDevices(vec.into_boxed_slice()))
         }
     }
 
@@ -145,23 +128,29 @@ pub mod vhci {
                 .read(true)
                 .write(true)
                 .attributes((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
-                .open(Self::path()?)?;
+                .open(Self::path().inspect(|path| println!("Driver path: {}", path.display()))?)?;
 
             Ok(Self { handle: file })
         }
 
-        fn imported_devices(
-            &self,
-        ) -> Result<Box<[WindowsImportedDevice]>, bincode::error::DecodeError> {
-            let mut reader = ioctl::Reader::new(
+        fn imported_devices(&self) -> Result<WindowsImportedDevices, bincode::error::DecodeError> {
+            let mut reader = ioctl::Reader::<{ ioctl::ImportedDevice::encoded_size_of() }>::new(
                 self.as_handle(),
-                DeviceType::Unknown,
-                IoctlFunction::GetImportedDevices.as_u32(),
+                ioctl::DeviceType::Unknown,
+                ioctl::Function::GetImportedDevices.as_u32(),
             );
 
-            let idevs: Vec<IoCtlIdev> =
-                bincode::decode_from_std_read(&mut reader, crate::net::bincode_config())?;
-            Ok(idevs.into_iter().map(From::from).collect())
+            let mut buf = Vec::new();
+            reader
+                .read_to_end(&mut buf)
+                .map_err(|err| bincode::error::DecodeError::Io {
+                    inner: err,
+                    additional: 0,
+                })?;
+
+            let config = crate::net::bincode_config().with_little_endian();
+            let idevs: WindowsImportedDevices = bincode::decode_from_slice(&buf, config)?.0;
+            Ok(idevs)
         }
 
         fn path() -> crate::vhci::Result<PathBuf> {
@@ -205,14 +194,10 @@ pub mod vhci {
         }
 
         fn imported_devices(&self) -> crate::vhci::Result<WindowsImportedDevices> {
-            Ok(self
-                .inner
-                .imported_devices()
-                .map(WindowsImportedDevices)
-                .map_err(|err| match err {
-                    DecodeError::Io { inner, .. } => inner,
-                    _ => std::io::Error::other(err),
-                })?)
+            Ok(self.inner.imported_devices().map_err(|err| match err {
+                DecodeError::Io { inner, .. } => inner,
+                _ => std::io::Error::other(err),
+            })?)
         }
     }
 
@@ -223,6 +208,23 @@ pub mod vhci {
     }
 
     impl crate::util::__private::Sealed for WindowsVhciDriver {}
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn driver_can_open() {
+            WindowsVhciDriver::open().unwrap();
+        }
+
+        #[test]
+        fn imported_devices_doesnt_die() {
+            let driver = WindowsVhciDriver::open().unwrap();
+
+            driver.imported_devices().unwrap();
+        }
+    }
 }
 
 pub static USB_IDS: &str = "";
