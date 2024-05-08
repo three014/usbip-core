@@ -422,9 +422,9 @@ impl DeviceType {
     }
 }
 
-impl Into<u32> for DeviceType {
-    fn into(self) -> u32 {
-        self.into_u32()
+impl From<DeviceType> for u32 {
+    fn from(val: DeviceType) -> Self {
+        val.into_u32()
     }
 }
 
@@ -480,9 +480,9 @@ impl From<u32> for TransferMethod {
     }
 }
 
-impl Into<u32> for TransferMethod {
-    fn into(self) -> u32 {
-        self.into_u32()
+impl From<TransferMethod> for u32 {
+    fn from(val: TransferMethod) -> Self {
+        val.into_u32()
     }
 }
 
@@ -555,8 +555,8 @@ impl From<u32> for ControlCode {
     }
 }
 
-impl Into<u32> for ControlCode {
-    fn into(self) -> u32 {
-        self.into_u32()
+impl From<ControlCode> for u32 {
+    fn from(val: ControlCode) -> Self {
+        val.into_u32()
     }
 }

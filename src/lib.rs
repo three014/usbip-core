@@ -192,10 +192,10 @@ impl bincode::Decode for UsbInterface {
     fn decode<D: bincode::de::Decoder>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let b_interface_class = bincode::Decode::decode(decoder)?;
-        let b_interface_subclass = bincode::Decode::decode(decoder)?;
-        let b_interface_protocol = bincode::Decode::decode(decoder)?;
-        let _padding = bincode::Decode::decode(decoder)?;
+        let b_interface_class = u8::decode(decoder)?;
+        let b_interface_subclass = u8::decode(decoder)?;
+        let b_interface_protocol = u8::decode(decoder)?;
+        let _padding = u8::decode(decoder)?;
 
         Ok(UsbInterface {
             b_interface_class,
