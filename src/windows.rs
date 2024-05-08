@@ -5,11 +5,17 @@ use windows::Win32::{
 
 pub mod vhci {
     use std::{
-        ffi::OsString, fs::File, io::Read, net::{SocketAddr, ToSocketAddrs}, ops::Deref, os::windows::{
+        ffi::OsString,
+        fs::File,
+        io::Read,
+        net::{SocketAddr, ToSocketAddrs},
+        ops::Deref,
+        os::windows::{
             ffi::OsStringExt,
             fs::OpenOptionsExt,
             io::{AsHandle, BorrowedHandle},
-        }, path::PathBuf
+        },
+        path::PathBuf,
     };
 
     use bincode::error::DecodeError;
@@ -21,10 +27,7 @@ pub mod vhci {
         },
     };
 
-    use crate::{
-        vhci::base,
-        windows::vhci::utils::ioctl,
-    };
+    use crate::{util::EncodedSize, vhci::base, windows::vhci::utils::ioctl};
 
     use super::Win32Error;
 
@@ -47,6 +50,20 @@ pub mod vhci {
     #[derive(Debug)]
     pub struct PortRecord {
         base: base::PortRecord,
+        port: u16,
+    }
+
+    impl From<ioctl::PortRecord> for PortRecord {
+        fn from(value: ioctl::PortRecord) -> Self {
+            let host = (&*value.host, value.service.parse().unwrap());
+            Self {
+                base: base::PortRecord {
+                    host: host.to_socket_addrs().unwrap().next().unwrap(),
+                    busid: value.busid,
+                },
+                port: value.port as u16,
+            }
+        }
     }
 
     #[derive(Debug)]
@@ -58,20 +75,13 @@ pub mod vhci {
 
     impl From<ioctl::ImportedDevice> for WindowsImportedDevice {
         fn from(value: ioctl::ImportedDevice) -> Self {
-            let host = (value.host.deref(), value.service.parse().unwrap());
             Self {
                 base: base::ImportedDevice {
-                    port: value.port as u16,
                     vendor: value.vendor,
                     product: value.product,
                     devid: value.devid,
                 },
-                record: PortRecord {
-                    base: base::PortRecord {
-                        busid: value.busid,
-                        host: host.to_socket_addrs().unwrap().next().unwrap(),
-                    },
-                },
+                record: PortRecord::from(value.record),
                 speed: value.speed,
             }
         }
@@ -96,11 +106,11 @@ pub mod vhci {
 
             // We use a byte array that's the same size as the
             // encoded struct to not leak the struct definition
-            decoder.claim_container_read::<[u8; ioctl::ImportedDevice::encoded_size_of()]>(len)?;
+            decoder.claim_container_read::<[u8; ioctl::ImportedDevice::ENCODED_SIZE_OF]>(len)?;
 
             let mut vec = Vec::with_capacity(len);
             for _ in 0..len {
-                decoder.unclaim_bytes_read(ioctl::ImportedDevice::encoded_size_of());
+                decoder.unclaim_bytes_read(ioctl::ImportedDevice::ENCODED_SIZE_OF);
 
                 let ioctldev = ioctl::ImportedDevice::decode(decoder)?;
                 let imported_device = WindowsImportedDevice::from(ioctldev);
@@ -132,7 +142,7 @@ pub mod vhci {
         }
 
         fn imported_devices(&self) -> Result<WindowsImportedDevices, bincode::error::DecodeError> {
-            let mut reader = ioctl::Reader::<{ ioctl::ImportedDevice::encoded_size_of() }>::new(
+            let mut reader = ioctl::Reader::<ioctl::ImportedDevice>::new(
                 self.as_handle(),
                 ioctl::DeviceType::Unknown,
                 ioctl::Function::GetImportedDevices.as_u32(),

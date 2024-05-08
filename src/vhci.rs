@@ -28,17 +28,12 @@ pub mod base {
 
     #[derive(Debug)]
     pub struct ImportedDevice {
-        pub(crate) port: u16,
         pub(crate) vendor: u16,
         pub(crate) product: u16,
         pub(crate) devid: u32,
     }
 
     impl ImportedDevice {
-        pub const fn port(&self) -> u16 {
-            self.port
-        }
-
         pub const fn vendor(&self) -> u16 {
             self.vendor
         }

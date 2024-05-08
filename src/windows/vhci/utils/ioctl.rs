@@ -1,8 +1,11 @@
 use std::ffi::c_char;
 use std::io::Read;
+use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 
+use bincode::enc::write::Writer;
+use bincode::impl_borrow_decode;
 use bitflags::bitflags;
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, HANDLE, WIN32_ERROR};
 use windows::Win32::Storage::FileSystem::{FILE_READ_DATA, FILE_WRITE_DATA};
@@ -12,6 +15,7 @@ use windows::Win32::System::Ioctl::{
 use windows::Win32::System::IO::DeviceIoControl;
 
 use crate::containers::stacktools::StackStr;
+use crate::util::EncodedSize;
 use crate::{DeviceSpeed, BUS_ID_SIZE};
 
 use super::consts::{NI_MAXHOST, NI_MAXSERV};
@@ -31,56 +35,115 @@ impl Function {
     }
 }
 
-#[derive(bincode::Encode)]
-pub struct ImportedDevice {
+pub struct PortRecord {
     pub port: i32,
     pub busid: StackStr<BUS_ID_SIZE>,
     pub service: StackStr<NI_MAXSERV>,
     pub host: StackStr<NI_MAXHOST>,
-    pub devid: u32,
-    pub speed: crate::DeviceSpeed,
-    pub vendor: u16,
-    pub product: u16,
 }
 
-impl ImportedDevice {
-    #[inline]
-    pub const fn encoded_size_of() -> usize {
+unsafe impl EncodedSize for PortRecord {
+    const ENCODED_SIZE_OF: usize = {
         #[repr(C)]
-        struct EncodedImportedDevice {
+        struct EncodedPortRecord {
             port: i32,
             busid: [c_char; BUS_ID_SIZE],
             service: [c_char; NI_MAXSERV],
             host: [c_char; NI_MAXHOST],
-            devid: u32,
-            speed: crate::DeviceSpeed,
-            vendor: u16,
-            product: u16,
         }
 
-        core::mem::size_of::<EncodedImportedDevice>()
-    }
+        core::mem::size_of::<EncodedPortRecord>()
+    };
 }
 
-impl bincode::Decode for ImportedDevice {
-    fn decode<D: bincode::de::Decoder>(decoder: &mut D) -> Result<Self, bincode::error::DecodeError> {
+impl bincode::Decode for PortRecord {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
         use bincode::de::read::Reader as _;
         let port = i32::decode(decoder)?;
         let busid = StackStr::decode(decoder)?;
         let service = StackStr::decode(decoder)?;
         let host = StackStr::decode(decoder)?;
+        // Account for padding from irregular struct size
         decoder.claim_bytes_read(3)?;
         decoder.reader().consume(3);
-        let devid = u32::decode(decoder)?;
-        let speed = DeviceSpeed::decode(decoder)?;
-        let vendor = u16::decode(decoder)?;
-        let product = u16::decode(decoder)?;
 
         Ok(Self {
             port,
             busid,
             service,
             host,
+        })
+    }
+}
+
+impl_borrow_decode!(PortRecord);
+
+impl bincode::Encode for PortRecord {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.port.encode(encoder)?;
+        self.busid.encode(encoder)?;
+        self.service.encode(encoder)?;
+        self.host.encode(encoder)?;
+        encoder.writer().write(&[0, 0, 0])?;
+
+        Ok(())
+    }
+}
+
+pub struct ImportedDevice {
+    pub record: PortRecord,
+    pub devid: u32,
+    pub speed: crate::DeviceSpeed,
+    pub vendor: u16,
+    pub product: u16,
+}
+
+unsafe impl crate::util::EncodedSize for ImportedDevice {
+    const ENCODED_SIZE_OF: usize = {
+        #[repr(C)]
+        struct EncodedImportedDevice {
+            devid: u32,
+            speed: crate::DeviceSpeed,
+            vendor: u16,
+            product: u16,
+        }
+
+        PortRecord::ENCODED_SIZE_OF + core::mem::size_of::<EncodedImportedDevice>()
+    };
+}
+
+impl bincode::Encode for ImportedDevice {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.record.encode(encoder)?;
+        self.devid.encode(encoder)?;
+        self.speed.encode(encoder)?;
+        self.vendor.encode(encoder)?;
+        self.product.encode(encoder)?;
+
+        Ok(())
+    }
+}
+
+impl bincode::Decode for ImportedDevice {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let record = PortRecord::decode(decoder)?;
+        let devid = u32::decode(decoder)?;
+        let speed = DeviceSpeed::decode(decoder)?;
+        let vendor = u16::decode(decoder)?;
+        let product = u16::decode(decoder)?;
+
+        Ok(Self {
+            record,
             devid,
             speed,
             vendor,
@@ -89,13 +152,16 @@ impl bincode::Decode for ImportedDevice {
     }
 }
 
-pub struct Reader<'handle, const ENCODED_SIZE_OF_DATA: usize> {
+impl_borrow_decode!(ImportedDevice);
+
+pub struct Reader<'handle, E: crate::util::EncodedSize> {
     handle: BorrowedHandle<'handle>,
     ctl_code: u32,
     end_of_req: bool,
+    _e: PhantomData<E>,
 }
 
-impl<'handle, const ENCODED_SIZE_OF_DATA: usize> Reader<'handle, ENCODED_SIZE_OF_DATA> {
+impl<'handle, E: crate::util::EncodedSize> Reader<'handle, E> {
     pub const fn new(
         handle: BorrowedHandle<'handle>,
         dev_type: DeviceType,
@@ -111,17 +177,18 @@ impl<'handle, const ENCODED_SIZE_OF_DATA: usize> Reader<'handle, ENCODED_SIZE_OF
             )
             .into_u32(),
             end_of_req: false,
+            _e: PhantomData,
         }
     }
 }
 
-impl<'handle, const ENCODED_SIZE_OF_DATA: usize> Read for Reader<'handle, ENCODED_SIZE_OF_DATA> {
+impl<'handle, E: crate::util::EncodedSize> Read for Reader<'handle, E> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.end_of_req {
             return Ok(0);
         }
 
-        let encoded_size_of_data = ENCODED_SIZE_OF_DATA as u32;
+        let encoded_size_of_data = E::ENCODED_SIZE_OF as u32;
         let size_of_u32 = core::mem::size_of::<u32>() as u32;
         let code = self.ctl_code;
         let handle = HANDLE(self.handle.as_raw_handle() as isize);
@@ -186,11 +253,11 @@ impl<'handle, const ENCODED_SIZE_OF_DATA: usize> Read for Reader<'handle, ENCODE
         }
 
         let size_of_u32 = core::mem::size_of::<u32>();
-        let encoded_size_of_data = ENCODED_SIZE_OF_DATA;
+        let encoded_size_of_data = E::ENCODED_SIZE_OF;
 
         let mut start = 0;
 
-        for num_ioctl_devs in BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 4) {
+        for num_ioctl_devs in BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 2) {
             buf.resize(
                 (encoded_size_of_data)
                     .checked_mul(num_ioctl_devs)
@@ -219,8 +286,7 @@ impl<'handle, const ENCODED_SIZE_OF_DATA: usize> Read for Reader<'handle, ENCODE
             }
         }
 
-        let num_ioctl_devs =
-            ((buf.len() - size_of_u32) / encoded_size_of_data) as u32;
+        let num_ioctl_devs = ((buf.len() - size_of_u32) / encoded_size_of_data) as u32;
         buf[0..size_of_u32].copy_from_slice(&num_ioctl_devs.to_le_bytes());
 
         Ok(buf.len())

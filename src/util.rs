@@ -4,6 +4,11 @@ pub mod __private {
 
 use std::{ffi::c_char, str::FromStr};
 
+pub unsafe trait EncodedSize: bincode::Decode + bincode::Encode {
+    const ENCODED_SIZE_OF: usize;
+}
+
+#[allow(dead_code)]
 pub fn parse_token<'a, 'b: 'a, T>(tokens: &'a mut impl Iterator<Item = &'b str>) -> T
 where
     T: FromStr,
