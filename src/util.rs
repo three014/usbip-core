@@ -17,10 +17,20 @@ where
         .expect("Token should be valid")
 }
 
+#[inline]
 pub const fn cast_cchar_to_u8(a: &[c_char]) -> &[u8] {
     // SAFETY: The slice is of type c_char, which can
     //         only be u8 (in which this cast does nothing)
     //         or i8. UTF-8 allows individual character bytes
     //         to be either a u8 or i8.
     unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<u8>(), a.len()) }
+}
+
+#[inline]
+pub fn cast_cchar_to_u8_mut(a: &mut [c_char]) -> &mut [u8] {
+    // SAFETY: The slice is of type c_char, which can
+    //         only be u8 (in which this cast does nothing)
+    //         or i8. UTF-8 allows individual character bytes
+    //         to be either a u8 or i8.
+    unsafe { std::slice::from_raw_parts_mut(a.as_mut_ptr().cast::<u8>(), a.len()) }
 }
