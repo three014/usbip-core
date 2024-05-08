@@ -8,6 +8,50 @@ use std::{
 };
 
 
+/// A UTF-8 encoded string, but stored entirely on the stack.
+/// 
+/// # Examples
+/// 
+/// You can create a [`StackStr`] with [`StackStr::try_from`]:
+/// 
+/// [`StackStr::try_from`]: TryFrom::try_from
+/// 
+/// ```
+/// use usbip_core::containers::stacktools::StackStr;
+/// 
+/// // We know the string is less than 32 bytes, so we'll use `unwrap()`.
+/// let hello = StackStr::<32>::try_from("Hello, world!").unwrap();
+/// ```
+/// 
+/// [`StackStr`] implements the [`Write`] trait, so you
+/// can use it as a cool stack-allocated buffer.
+///
+/// ```
+/// use usbip_core::containers::stacktools::StackStr;
+/// use core::fmt::Write;
+/// 
+/// let mut hello = StackStr::<256>::new();
+/// 
+/// write!(&mut hello, "Hello, world!").unwrap();
+/// ```
+/// 
+/// # Deref
+/// 
+/// `StackStr` implements <code>[Deref]<Target = [str]></code>, and
+/// so inherits all of [`str`]'s methods. In addition,
+/// this means you can pass a `StackStr` to a function
+/// which takes a [`&str`] by using an ampersand (`&`):
+/// 
+/// ```
+/// use usbip_core::containers::stacktools::StackStr;
+/// 
+/// fn takes_str(s: &str) { }
+/// 
+/// let s = StackStr::<32>::try_from("Hello").unwrap();
+/// 
+/// takes_str(&s);
+/// 
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub struct StackStr<const N: usize> {
     len: usize,
@@ -15,7 +59,9 @@ pub struct StackStr<const N: usize> {
 }
 
 impl<const N: usize> StackStr<N> {
-    #[inline]
+    /// Creates a new string slice on
+    /// the stack with a zeroed buffer of size `N`.
+    #[inline(always)]
     pub const fn new() -> Self {
         Self {
             len: 0,
@@ -23,26 +69,38 @@ impl<const N: usize> StackStr<N> {
         }
     }
 
-    #[inline(always)]
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
+    /// Converts a [`StackStr`] to a [`Path`].
     pub fn as_path(&self) -> &Path {
         Path::new(self.deref())
     }
 
+    /// Converts a [`StackStr`] into an [`OsStr`].
+    /// #[inline]
     pub fn as_os_str(&self) -> &OsStr {
         OsStr::new(self.deref())
     }
 
-    /// Sets all bytes in the array to 0,
-    /// and sets `len` to 0 as well.
+    /// Sets the length of `self` to `0` without
+    /// modifying the internal buffer.
     pub fn clear(&mut self) {
-        self.buf.fill(0);
+        self.fill(0);
         self.len = 0;
     }
 
+    /// Fills `self` with elements by copying `value`.
+    /// Only fills the bytes from `0..self.len`.
+    pub fn fill(&mut self, value: c_char) {
+        let len = self.len;
+        self.buf[0..len].fill(value);
+    }
+
+    /// Form a [`StringStr`] from an array and a length.
+    /// 
+    /// The `len` argument is the number of bytes.
+    /// 
+    /// # SAFETY
+    /// 
+    /// `buf` MUST be a valid UTF-8 slice.
     #[inline(always)]
     pub const unsafe fn from_raw_parts(buf: [c_char; N], len: usize) -> Self {
         Self { buf, len }
@@ -52,8 +110,9 @@ impl<const N: usize> StackStr<N> {
 impl<const N: usize> Deref for StackStr<N> {
     type Target = str;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
-        let slice = &self.buf[..self.len()];
+        let slice = &self.buf[..self.len];
         let slice = crate::util::cast_cchar_to_u8(slice);
         // SAFETY: `StackStr` is always instantiated
         //         with valid UTF-8, and cannot be constructed
@@ -101,11 +160,10 @@ impl<const N: usize> Write for StackStr<N> {
         if s.len() > N - self.len() {
             Err(fmt::Error::default())
         } else {
-            let len = self.len;
-            for (idx, &byte) in s.as_bytes().iter().enumerate() {
-                self.buf[idx + len] = byte as c_char;
-            }
-            self.len = s.len() + len;
+            let len = self.len();
+            let u8_buf = crate::util::cast_cchar_to_u8_mut(&mut self.buf);
+            u8_buf[len..s.len()].copy_from_slice(s.as_bytes());
+            self.len += s.len();
             Ok(())
         }
     }
@@ -144,7 +202,8 @@ fn decode_and_validate<D: bincode::de::Decoder, const N: usize>(
     let u8_buf = crate::util::cast_cchar_to_u8(&buf[0..N]);
     let len = std::str::from_utf8(u8_buf)
         .map_err(|err| bincode::error::DecodeError::Utf8 { inner: err })?
-        .trim_start_matches(char::from(0u8))
+        // What happens if the start of the string has a buncha null bytes?
+        //.trim_start_matches(char::from(0u8))
         .trim_end_matches(char::from(0u8))
         .len();
 
