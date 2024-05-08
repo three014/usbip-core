@@ -21,8 +21,8 @@ pub mod net {
 
     use bincode::config::{BigEndian, Configuration, Fixint};
 
+    /// The result of a USB/IP network request.
     #[derive(Debug, Clone, Copy, bincode::Encode, bincode::Decode)]
-    #[repr(u32)]
     pub enum Status {
         Success = 0x00,
         Failed = 0x01,
@@ -45,6 +45,12 @@ pub mod net {
         }
     }
 
+    /// Returns the [`bincode::Configuration`] used
+    /// for network communication.
+    ///
+    /// The current config is no limit on transfers, big endian, and fixed int encoding.
+    ///
+    /// [`bincode::Configuration`]: bincode::config::Configuration
     pub const fn bincode_config() -> Configuration<BigEndian, Fixint> {
         bincode::config::standard()
             .with_no_limit()
@@ -56,6 +62,7 @@ pub mod net {
 use core::fmt;
 use std::{num::ParseIntError, path::Path, str::FromStr};
 
+use bincode::de::read::Reader;
 use containers::stacktools::StackStr;
 
 pub use platform::USB_IDS;
@@ -88,7 +95,7 @@ impl UsbDevice {
     }
 
     pub fn bus_id(&self) -> &str {
-        &self.busid
+        &*self.busid
     }
 
     pub const fn dev_id(&self) -> u32 {
@@ -108,6 +115,7 @@ impl UsbDevice {
     }
 }
 
+/// The state of a [`vhci`] device port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceStatus {
     DevAvailable = 0x01,
@@ -154,7 +162,7 @@ impl FromStr for DeviceStatus {
     type Err = ParseDeviceStatusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let status = match s.parse::<usize>().map_err(Self::Err::Parse)? {
+        let status = match s.parse::<u8>().map_err(Self::Err::Parse)? {
             1 => Self::DevAvailable,
             2 => Self::DevInUse,
             3 => Self::DevError,
@@ -195,7 +203,8 @@ impl bincode::Decode for UsbInterface {
         let b_interface_class = u8::decode(decoder)?;
         let b_interface_subclass = u8::decode(decoder)?;
         let b_interface_protocol = u8::decode(decoder)?;
-        let _padding = u8::decode(decoder)?;
+        decoder.claim_bytes_read(core::mem::size_of::<u8>())?;
+        decoder.reader().consume(core::mem::size_of::<u8>());
 
         Ok(UsbInterface {
             b_interface_class,

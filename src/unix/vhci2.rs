@@ -2,13 +2,11 @@
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use crate::vhci::VhciDriver;
-
     use super::*;
 
     #[test]
     fn driver_opens() {
-        UnixDriver::open().unwrap();
+        UnixVhciDriver::open().unwrap();
     }
 
     #[test]
@@ -39,7 +37,7 @@ use crate::{
         beef::Beef,
         stacktools::{self, StackStr},
     },
-    util::parse_token,
+    util::{parse_token, __private::Sealed},
     vhci::{base, HubSpeed},
     DeviceSpeed, DeviceStatus,
 };
@@ -386,7 +384,7 @@ impl TryFrom<InitData<'_>> for UnixImportedDevices {
 
     fn try_from(init: InitData) -> Result<Self, Self::Error> {
         let mut attr = StackStr::<20>::new();
-        let mut idevs = Vec::with_capacity(init.num_ports.get());
+        let mut idevs = Vec::new();
 
         write!(attr, "status").unwrap();
 
@@ -397,9 +395,7 @@ impl TryFrom<InitData<'_>> for UnixImportedDevices {
             }
 
             let status = init.hc_device.sysattr(Beef::Borrowed(&attr))?;
-            let mut lines = status.lines();
-            lines.next();
-            for line in lines {
+            for line in status.lines().skip(1) {
                 let idev = if let MaybeUnixImportedDevice(Some(idev)) =
                     line.parse().map_err(Into::<UdevError>::into)?
                 {
@@ -424,7 +420,7 @@ impl crate::UsbDevice {
     }
 }
 
-pub struct UnixDriver {
+pub struct UnixVhciDriver {
     inner: InnerDriver,
 }
 
@@ -538,22 +534,25 @@ pub struct AttachArgs {
     pub device_speed: DeviceSpeed,
 }
 
-impl crate::vhci::VhciDriver for UnixDriver {
-    fn open() -> crate::vhci::Result<Self> {
+impl UnixVhciDriver {
+    #[inline]
+    pub fn open() -> crate::vhci::Result<Self> {
         Ok(Self {
             inner: InnerDriver::try_open()?,
         })
     }
 
-    fn detach(&mut self, _port: u16) -> crate::vhci::Result<()> {
+    pub fn detach(&mut self, _port: u16) -> crate::vhci::Result<()> {
         todo!()
     }
 
-    fn attach(&mut self, args: AttachArgs) -> Result<u16, crate::vhci::error::AttachError> {
+    #[inline(always)]
+    pub fn attach(&mut self, args: AttachArgs) -> Result<u16, crate::vhci::error::AttachError> {
         self.inner.attach(args)
     }
 
-    fn imported_devices(&self) -> crate::vhci::Result<UnixImportedDevices> {
+    #[inline(always)]
+    pub fn imported_devices(&self) -> crate::vhci::Result<UnixImportedDevices> {
         self.inner.imported_devices()
     }
 }
@@ -579,4 +578,3 @@ fn num_controllers(hc_device: &udev::Device) -> crate::vhci::Result<NonZeroUsize
     Ok(count)
 }
 
-impl crate::util::__private::Sealed for UnixDriver {}

@@ -1,15 +1,23 @@
+//! Ahh, the silly vhci module. This is where everything begins.
+//!
+//! The entrypoint to this library is with the [`VhciDriver`] trait,
+//! which is implemented by the [`WindowsVhciDriver`] and [`UnixVhciDriver`]
+//! structs at the time of this writing. That way, the driver can be presented
+//! through a single interface. Users of this library need not worry about
+//! without platform they're using.
+
 pub(crate) mod error;
 mod platform {
     #[cfg(unix)]
     pub use crate::unix::vhci2::{
-        AttachArgs, PortRecord, UnixDriver as Driver, UnixImportedDevice as ImportedDevice,
-        STATE_PATH, UnixImportedDevices as ImportedDevices,
+        AttachArgs, PortRecord, UnixImportedDevice as ImportedDevice,
+        UnixImportedDevices as ImportedDevices, UnixVhciDriver as Driver, STATE_PATH,
     };
 
     #[cfg(windows)]
     pub use crate::windows::vhci::{
-        PortRecord, WindowsImportedDevice as ImportedDevice, WindowsVhciDriver as Driver,
-        STATE_PATH, AttachArgs, WindowsImportedDevices as ImportedDevices
+        AttachArgs, PortRecord, WindowsImportedDevice as ImportedDevice,
+        WindowsImportedDevices as ImportedDevices, WindowsVhciDriver as Driver, STATE_PATH,
     };
 }
 
@@ -67,6 +75,7 @@ use std::str::FromStr;
 pub use error::Error;
 pub use platform::{AttachArgs, Driver, ImportedDevice, ImportedDevices, PortRecord, STATE_PATH};
 
+use crate::util::__private::Sealed;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -127,7 +136,95 @@ impl fmt::Display for ParseHubSpeedError {
 
 impl std::error::Error for ParseHubSpeedError {}
 
-pub trait VhciDriver: Sized + crate::util::__private::Sealed {
+/// An object that provides an interface
+/// to the vhci driver.
+///
+/// # Platform-specific behavior
+/// On Unix, the vhci_hcd kernel module needs to be loaded
+/// to use the driver, and many actions require superuser
+/// permissions.
+///
+/// On Windows, the usbip-win2 ude driver needs to be
+/// installed.
+pub struct VhciDriver2 {
+    inner: Driver,
+}
+
+impl VhciDriver2 {
+
+    /// Creates a new [`VhciDriver2`] from
+    /// a platform-specific driver implementation.
+    #[inline(always)]
+    const fn new(inner: Driver) -> Self {
+        Self { inner }
+    }
+
+    #[inline(always)]
+    const fn get(&self) -> &Driver {
+        &self.inner
+    }
+
+    #[inline(always)]
+    fn get_mut(&mut self) -> &mut Driver {
+        &mut self.inner
+    }
+
+    /// Opens the vhci driver.
+    ///
+    /// # Errors
+    /// This function will return an error if
+    /// the underlying kernel driver was not loaded.
+    #[inline(always)]
+    pub fn open() -> Result<Self> {
+        Ok(Self::new(Driver::open()?))
+    }
+
+    /// Attaches a host's USB device to this device.
+    ///
+    /// # Platform-specific behavior
+    /// On unix, this function assumes that a connection
+    /// has already been established with the host system.
+    ///
+    /// On windows, this function will first attempt to establish
+    /// a connection with the host.
+    #[inline(always)]
+    pub fn attach(&mut self, args: AttachArgs) -> std::result::Result<u16, error::AttachError> {
+        self.get_mut().attach(args)
+    }
+
+    #[inline(always)]
+    pub fn detach(&mut self, port: u16) -> Result<()> {
+        self.get_mut().detach(port)
+    }
+
+    /// Returns a list of usb devices that are
+    /// currently attached to this device.
+    ///
+    /// Because other programs can interface with the
+    /// kernel driver and attach/detach usb devices,
+    /// this list can become outdated. Developers that
+    /// would like to use this function to maintain
+    /// a list for a user to view should call this
+    /// function regularly to get an updated view.
+    ///
+    /// # Errors
+    /// This function will return an error if the
+    /// kernel driver malfunctions. On platforms
+    /// that store the records in files, this
+    /// function can error if those files were
+    /// incorrectly modified.
+    ///
+    /// # Platform-specific behavior
+    /// On windows, this function always allocates
+    /// memory, even if there are no attached
+    /// usb devices.
+    #[inline(always)]
+    pub fn imported_devices(&self) -> Result<ImportedDevices> {
+        self.get().imported_devices()
+    }
+}
+
+pub trait VhciDriver: Sized + Sealed {
     fn open() -> Result<Self>;
     fn attach(&mut self, args: AttachArgs) -> std::result::Result<u16, error::AttachError>;
     fn detach(&mut self, port: u16) -> Result<()>;
