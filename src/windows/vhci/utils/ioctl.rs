@@ -1,11 +1,56 @@
+//! # Goals for this module
+//! I want to define some sort of interface that specifies
+//! an IoCtl function, control code, and a data layout suitable
+//! for both the input/output.
+//!
+//! This data layout does not need to be in its final form,
+//! but should avoid taking advantage of that fact through
+//! "hacky" formats and tricks.
+//!
+//! # Motivation
+//! Every function from the usbip-win2 userspace library
+//! share a huge similarity in that they interact with
+//! the DeviceIoControl windows syscall. It makes me
+//! think of each function as a module that can be
+//! added to the vhci driver to gain more functionality.
+//! Therefore I want each module to be able to provide
+//! DeviceIoControl with all the information it needs to
+//! do its job, allow simultaneously presenting itself
+//! as an opaque data type (until it is converted into
+//! its usable form).
+//!
+//! # Current work
+//! As of 5/8/2024, there is a [`IoControl`] trait that
+//! defines a module's [`ControlCode`] based on the given
+//! [`Function`]. Each module can also implement a separate
+//! trait called [`EncodedSize`] which allows a type
+//! to specify the amount of bytes they will take up in
+//! their encoded format, which has proven useful since
+//! the vhci driver requires the user to specify the size of
+//! their data types for verification (I think).
+//!
+//! There's also a struct called [`Reader`], and its
+//! job is to read data from the DeviceIoControl
+//! based on input data that it currently calculates from
+//! the [`IoControl`] and [`EncodedSize`] methods.
+//!
+//! Despite the existing traits, it feels clunky to
+//! send data to the DeviceIoControl because the
+//! existing data is not specific enough to
+//! generate the right data. Also, while it felt right
+//! at the time, it now feels weird to use the [`std::io::Read`]
+//! and [`std::io::Write`] traits, since the assumptions
+//! a user would have with those traits don't follow
+//! for my current model.
+
+use core::fmt;
 use std::ffi::c_char;
-use std::io::Read;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 
-use bincode::enc::write::Writer;
-use bincode::impl_borrow_decode;
+use bincode::de::read::Reader as _;
+use bincode::{impl_borrow_decode, Decode, Encode};
 use bitflags::bitflags;
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, HANDLE, WIN32_ERROR};
 use windows::Win32::Storage::FileSystem::{FILE_READ_DATA, FILE_WRITE_DATA};
@@ -14,11 +59,35 @@ use windows::Win32::System::Ioctl::{
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
+use crate::containers::iterators::BitShiftLeft;
 use crate::containers::stacktools::StackStr;
 use crate::util::EncodedSize;
 use crate::{DeviceSpeed, BUS_ID_SIZE};
 
 use super::consts::{NI_MAXHOST, NI_MAXSERV};
+
+pub trait IoControl<T> {
+    type Input: EncodedSize + bincode::Encode;
+    // How to distiguish between containers and the actual type???
+    type Output: EncodedSize + bincode::Decode;
+
+    const FUNCTION: Function;
+
+    fn ctrl_code() -> ControlCode {
+        ControlCode(
+            DeviceType::Unknown,
+            RequiredAccess::READ_WRITE_DATA,
+            <Self as IoControl<T>>::FUNCTION.as_u32(),
+            TransferMethod::Buffered,
+        )
+    }
+
+    fn send<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError>;
+    fn recv<D: bincode::de::Decoder>(decoder: &mut D) -> Result<T, bincode::error::DecodeError>;
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Function {
@@ -32,6 +101,67 @@ pub enum Function {
 impl Function {
     pub const fn as_u32(&self) -> u32 {
         *self as u32
+    }
+}
+
+pub struct Attach<'a> {
+    record: &'a PortRecord,
+}
+
+impl<'a> Attach<'a> {
+    pub const fn new(record: &'a PortRecord) -> Self {
+        Self {
+            record
+        }
+    }
+}
+
+pub struct Port(u16);
+
+impl bincode::Decode for Port {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let port = i32::decode(decoder)?;
+        Ok(Port(port as u16))
+    }
+}
+
+impl bincode::Encode for Port {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        let port = self.0 as i32;
+        port.encode(encoder)
+    }
+}
+
+unsafe impl EncodedSize for Port {
+    const ENCODED_SIZE_OF: usize = core::mem::size_of::<i32>();
+}
+
+impl IoControl<u16> for Attach<'_> {
+    type Input = PortRecord;
+    type Output = Port;
+
+    const FUNCTION: Function = Function::PluginHardware;
+
+    fn send<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        let size_of = (Self::Input::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
+        size_of.encode(encoder)?;
+        self.record.encode(encoder)?;
+        Ok(())
+    }
+
+    fn recv<D: bincode::de::Decoder>(decoder: &mut D) -> Result<u16, bincode::error::DecodeError> {
+        decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
+        decoder.reader().consume(core::mem::size_of::<u32>());
+        let port = Port::decode(decoder)?;
+        Ok(port.0)
     }
 }
 
@@ -85,6 +215,7 @@ impl bincode::Encode for PortRecord {
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
+        use bincode::enc::write::Writer;
         self.port.encode(encoder)?;
         self.busid.encode(encoder)?;
         self.service.encode(encoder)?;
@@ -95,6 +226,51 @@ impl bincode::Encode for PortRecord {
     }
 }
 
+pub struct GetImportedDevices;
+
+impl IoControl<Vec<ImportedDevice>> for GetImportedDevices {
+    type Input = SizeOf;
+    type Output = ImportedDevice;
+    const FUNCTION: Function = Function::GetImportedDevices;
+
+    fn recv<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Vec<Self::Output>, bincode::error::DecodeError> {
+        let len = u32::decode(decoder)? as usize;
+        let mut buf = Vec::with_capacity(len);
+
+        decoder.claim_container_read::<[u8; Self::Output::ENCODED_SIZE_OF]>(len)?;
+
+        for _ in 0..len {
+            decoder.unclaim_bytes_read(Self::Output::ENCODED_SIZE_OF);
+
+            let idev = Self::Output::decode(decoder)?;
+            buf.push(idev);
+        }
+
+        Ok(buf)
+    }
+
+    fn send<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        SizeOf(
+            (Self::Output::ENCODED_SIZE_OF + core::mem::size_of::<u32>())
+                .try_into()
+                .unwrap(),
+        )
+        .encode(encoder)
+    }
+}
+
+#[derive(bincode::Encode, bincode::Decode)]
+pub struct SizeOf(u32);
+
+unsafe impl EncodedSize for SizeOf {
+    const ENCODED_SIZE_OF: usize = core::mem::size_of::<u32>();
+}
+
 pub struct ImportedDevice {
     pub record: PortRecord,
     pub devid: u32,
@@ -103,7 +279,7 @@ pub struct ImportedDevice {
     pub product: u16,
 }
 
-unsafe impl crate::util::EncodedSize for ImportedDevice {
+unsafe impl EncodedSize for ImportedDevice {
     const ENCODED_SIZE_OF: usize = {
         #[repr(C)]
         struct EncodedImportedDevice {
@@ -152,114 +328,80 @@ impl bincode::Decode for ImportedDevice {
     }
 }
 
-impl_borrow_decode!(ImportedDevice);
+#[derive(Debug)]
+pub enum DoorError {
+    Send(bincode::error::EncodeError),
+    Recv(bincode::error::DecodeError),
+    Io(std::io::Error),
+}
 
-pub struct Reader<'handle, E: crate::util::EncodedSize> {
-    handle: BorrowedHandle<'handle>,
-    ctl_code: u32,
+impl fmt::Display for DoorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+
+impl From<bincode::error::DecodeError> for DoorError {
+    fn from(value: bincode::error::DecodeError) -> Self {
+        DoorError::Recv(value)
+    }
+}
+
+impl From<bincode::error::EncodeError> for DoorError {
+    fn from(value: bincode::error::EncodeError) -> Self {
+        DoorError::Send(value)
+    }
+}
+
+impl From<std::io::Error> for DoorError {
+    fn from(value: std::io::Error) -> Self {
+        DoorError::Io(value)
+    }
+}
+
+pub struct Door {
     end_of_req: bool,
-    _e: PhantomData<E>,
 }
 
-impl<'handle, E: crate::util::EncodedSize> Reader<'handle, E> {
-    pub const fn new(
-        handle: BorrowedHandle<'handle>,
-        dev_type: DeviceType,
-        ctl_read_num: u32,
-    ) -> Self {
-        Self {
-            handle,
-            ctl_code: ControlCode(
-                dev_type,
-                RequiredAccess::READ_WRITE_DATA,
-                ctl_read_num,
-                TransferMethod::Buffered,
-            )
-            .into_u32(),
-            end_of_req: false,
-            _e: PhantomData,
-        }
-    }
-}
-
-impl<'handle, E: crate::util::EncodedSize> Read for Reader<'handle, E> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.end_of_req {
-            return Ok(0);
-        }
-
-        let encoded_size_of_data = E::ENCODED_SIZE_OF as u32;
-        let size_of_u32 = core::mem::size_of::<u32>() as u32;
-        let code = self.ctl_code;
-        let handle = HANDLE(self.handle.as_raw_handle() as isize);
-        let buf_len = (encoded_size_of_data + size_of_u32).to_ne_bytes();
-        let mut bytes_returned = 0;
-
-        // SAFETY: `buf` is a valid mutable slice
-        let result = unsafe {
-            DeviceIoControl(
-                handle,
-                code,
-                Some(buf_len.as_ptr().cast()),
-                buf_len.len().try_into().unwrap(),
-                Some(buf.as_mut_ptr().cast()),
-                buf.len().try_into().unwrap(),
-                Some(std::ptr::addr_of_mut!(bytes_returned)),
-                None,
-            )
-        };
-
-        if let Err(err) = result {
-            if bytes_returned < size_of_u32 {
-                return Err(std::io::Error::other(
-                    "Unexpected response from the usbip driver",
-                ));
-            }
-            let win32_err =
-                WIN32_ERROR::from_error(&err).expect("Converting error from DeviceIoControl");
-            match win32_err {
-                ERROR_MORE_DATA => Ok(bytes_returned.try_into().unwrap()),
-                ERROR_INSUFFICIENT_BUFFER => {
-                    Err(std::io::Error::from_raw_os_error(win32_err.0 as i32))
-                }
-                _ => Err(std::io::Error::last_os_error()),
-            }
-        } else {
-            self.end_of_req = true;
-            Ok(bytes_returned.try_into().unwrap())
-        }
+impl Door {
+    const fn new() -> Self {
+        Self { end_of_req: false }
     }
 
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
-        struct BitShiftLeft {
-            mask: NonZeroU32,
-            num: usize,
-        }
-
-        impl BitShiftLeft {
-            const fn new(mask: NonZeroU32, num: usize) -> Self {
-                Self { mask, num }
+    pub fn relay<T, I: IoControl<T>>(handle: BorrowedHandle, ioctl: I) -> Result<T, DoorError> {
+        struct EncodeHelper<'a, T, I: IoControl<T>>(&'a I, PhantomData<&'a T>);
+        impl<T, I: IoControl<T>> bincode::Encode for EncodeHelper<'_, T, I> {
+            fn encode<E: bincode::enc::Encoder>(
+                &self,
+                encoder: &mut E,
+            ) -> Result<(), bincode::error::EncodeError> {
+                self.0.send(encoder)
             }
         }
 
-        impl Iterator for BitShiftLeft {
-            type Item = usize;
-
-            fn next(&mut self) -> Option<Self::Item> {
-                let next = self.num;
-                self.num = self.num.checked_shl(self.mask.get())?;
-                Some(next)
+        struct DecodeWrapper<T, I: IoControl<T>>(T, PhantomData<I>);
+        impl<T, I: IoControl<T>> bincode::Decode for DecodeWrapper<T, I> {
+            fn decode<D: bincode::de::Decoder>(
+                decoder: &mut D,
+            ) -> Result<Self, bincode::error::DecodeError> {
+                let out = I::recv(decoder)?;
+                Ok(Self(out, PhantomData))
             }
         }
 
-        let size_of_u32 = core::mem::size_of::<u32>();
-        let encoded_size_of_data = E::ENCODED_SIZE_OF;
-
+        let mut door = Door::new();
+        let code = I::ctrl_code().into_u32();
+        let handle = HANDLE(handle.as_raw_handle() as isize);
+        let input = bincode::encode_to_vec(
+            EncodeHelper(&ioctl, PhantomData),
+            crate::net::bincode_config().with_little_endian(),
+        )?;
+        let mut output = Vec::<u8>::new();
         let mut start = 0;
 
         for num_ioctl_devs in BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 2) {
-            buf.resize(
-                (encoded_size_of_data)
+            output.resize(
+                I::Output::ENCODED_SIZE_OF
                     .checked_mul(num_ioctl_devs)
                     .unwrap()
                     .checked_add(core::mem::size_of::<u32>())
@@ -267,29 +409,80 @@ impl<'handle, E: crate::util::EncodedSize> Read for Reader<'handle, E> {
                 0,
             );
 
-            match self.read(&mut buf[start..]) {
+            match door.read_write(handle, code, &input, &mut output[start..]) {
                 Ok(0) => {
-                    buf.resize(start, 0);
+                    output.resize(start, 0);
                     break;
                 }
                 Ok(bytes_read) => {
                     start += bytes_read;
                 }
                 Err(err) => {
-                    if let Some(raw_err) = err.raw_os_error() {
-                        if raw_err != (ERROR_INSUFFICIENT_BUFFER.0 as i32) {
-                            return Err(err);
-                        }
-                        // Otherwise we keep going but with a larger buffer next time
+                    if err.kind() != std::io::ErrorKind::WriteZero {
+                        return Err(err.into());
                     }
                 }
             }
         }
 
-        let num_ioctl_devs = ((buf.len() - size_of_u32) / encoded_size_of_data) as u32;
-        buf[0..size_of_u32].copy_from_slice(&num_ioctl_devs.to_le_bytes());
+        let num_items =
+            ((output.len() - core::mem::size_of::<u32>()) / I::Output::ENCODED_SIZE_OF) as u32;
+        output[0..core::mem::size_of::<u32>()].copy_from_slice(&num_items.to_le_bytes());
 
-        Ok(buf.len())
+        let output = bincode::decode_from_slice::<DecodeWrapper<T, I>, _>(
+            &output,
+            crate::net::bincode_config().with_little_endian(),
+        )?
+        .0;
+
+        Ok(output.0)
+    }
+
+    fn read_write(
+        &mut self,
+        handle: HANDLE,
+        code: u32,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> std::io::Result<usize> {
+        if self.end_of_req {
+            return Ok(0);
+        }
+
+        let mut bytes_returned: u32 = 0;
+
+        // SAFETY: Both `input` and `output` are valid slices.
+        let result = unsafe {
+            DeviceIoControl(
+                handle,
+                code,
+                Some(input.as_ptr().cast()),
+                input.len() as u32,
+                Some(output.as_mut_ptr().cast()),
+                output.len() as u32,
+                Some(core::ptr::addr_of_mut!(bytes_returned)),
+                None,
+            )
+        };
+
+        if let Err(err) = result {
+            if usize::try_from(bytes_returned).unwrap() < core::mem::size_of::<u32>() {
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+            }
+
+            let win32_err =
+                WIN32_ERROR::from_error(&err).expect("Converting error from DeviceIoControl");
+            match win32_err {
+                ERROR_MORE_DATA => Ok(bytes_returned.try_into().unwrap()),
+                ERROR_INSUFFICIENT_BUFFER => {
+                    Err(std::io::Error::from(std::io::ErrorKind::WriteZero))
+                }
+                _ => Err(std::io::Error::last_os_error()),
+            }
+        } else {
+            self.end_of_req = true;
+            Ok(bytes_returned.try_into().unwrap())
+        }
     }
 }
 

@@ -1,10 +1,4 @@
 //! Ahh, the silly vhci module. This is where everything begins.
-//!
-//! The entrypoint to this library is with the [`VhciDriver`] trait,
-//! which is implemented by the [`WindowsVhciDriver`] and [`UnixVhciDriver`]
-//! structs at the time of this writing. That way, the driver can be presented
-//! through a single interface. Users of this library need not worry about
-//! without platform they're using.
 
 pub(crate) mod error;
 mod platform {

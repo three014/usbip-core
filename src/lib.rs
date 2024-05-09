@@ -14,6 +14,30 @@ pub mod containers {
     pub mod beef;
     pub mod singleton;
     pub mod stacktools;
+    pub mod iterators {
+        use std::num::NonZeroU32;
+
+        pub struct BitShiftLeft {
+            mask: NonZeroU32,
+            num: usize,
+        }
+
+        impl BitShiftLeft {
+            pub const fn new(mask: NonZeroU32, num: usize) -> Self {
+                Self { mask, num }
+            }
+        }
+
+        impl Iterator for BitShiftLeft {
+            type Item = usize;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let next = self.num;
+                self.num = self.num.checked_shl(self.mask.get())?;
+                Some(next)
+            }
+        }
+    }
 }
 mod util;
 pub mod net {

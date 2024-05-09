@@ -27,9 +27,11 @@ pub mod vhci {
         },
     };
 
-    use crate::{util::EncodedSize, vhci::base, windows::vhci::utils::ioctl};
+    use crate::{containers::stacktools::StackStr, vhci::base, windows::vhci::utils::ioctl};
 
     use super::Win32Error;
+
+    pub use utils::ioctl::DoorError;
 
     mod utils;
 
@@ -100,24 +102,13 @@ pub mod vhci {
         }
     }
 
-    impl bincode::Decode for WindowsImportedDevices {
-        fn decode<D: bincode::de::Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
-            let len = u32::decode(decoder)? as usize;
-
-            // We use a byte array that's the same size as the
-            // encoded struct to not leak the struct definition
-            decoder.claim_container_read::<[u8; ioctl::ImportedDevice::ENCODED_SIZE_OF]>(len)?;
-
-            let mut vec = Vec::with_capacity(len);
-            for _ in 0..len {
-                decoder.unclaim_bytes_read(ioctl::ImportedDevice::ENCODED_SIZE_OF);
-
-                let ioctldev = ioctl::ImportedDevice::decode(decoder)?;
-                let imported_device = WindowsImportedDevice::from(ioctldev);
-                vec.push(imported_device);
-            }
-
-            Ok(WindowsImportedDevices(vec.into_boxed_slice()))
+    impl FromIterator<ioctl::ImportedDevice> for WindowsImportedDevices {
+        fn from_iter<T: IntoIterator<Item = ioctl::ImportedDevice>>(iter: T) -> Self {
+            let vec: Vec<_> = iter
+                .into_iter()
+                .map(|idev| WindowsImportedDevice::from(idev))
+                .collect();
+            WindowsImportedDevices(vec.into_boxed_slice())
         }
     }
 
@@ -141,23 +132,32 @@ pub mod vhci {
             Ok(Self { handle: file })
         }
 
+        fn attach(&mut self, args: AttachArgs) -> Result<u16, DoorError> {
+            let record = ioctl::PortRecord {
+                port: 0, // Not read by DeviceIoControl
+                busid: StackStr::try_from(args.bus_id).unwrap(),
+                service: StackStr::try_from(format_args!("{}", args.host.port())).unwrap(),
+                host: StackStr::try_from(format_args!("{}", args.host.ip())).unwrap()
+            };
+
+            let port = ioctl::Door::relay(self.as_handle(), ioctl::Attach::new(
+                &record
+            ))?;
+            
+            Ok(port)
+        }
+
         fn imported_devices(&self) -> Result<WindowsImportedDevices, bincode::error::DecodeError> {
-            let mut reader = ioctl::Reader::<ioctl::ImportedDevice>::new(
-                self.as_handle(),
-                ioctl::DeviceType::Unknown,
-                ioctl::Function::GetImportedDevices.as_u32(),
-            );
+            let idevs = ioctl::Door::relay(self.as_handle(), ioctl::GetImportedDevices)
+                .map_err(|err| match err {
+                    DoorError::Io(io) => bincode::error::DecodeError::Io {
+                        inner: io,
+                        additional: 0,
+                    },
+                    DoorError::Recv(recv) => recv,
+                    DoorError::Send(_) => unreachable!(),
+                })?.into_iter().collect();
 
-            let mut buf = Vec::new();
-            reader
-                .read_to_end(&mut buf)
-                .map_err(|err| bincode::error::DecodeError::Io {
-                    inner: err,
-                    additional: 0,
-                })?;
-
-            let config = crate::net::bincode_config().with_little_endian();
-            let idevs: WindowsImportedDevices = bincode::decode_from_slice(&buf, config)?.0;
             Ok(idevs)
         }
 

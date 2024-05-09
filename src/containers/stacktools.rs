@@ -75,7 +75,7 @@ impl<const N: usize> StackStr<N> {
     }
 
     /// Converts a [`StackStr`] into an [`OsStr`].
-    /// #[inline]
+    #[inline]
     pub fn as_os_str(&self) -> &OsStr {
         OsStr::new(self.deref())
     }
@@ -94,7 +94,7 @@ impl<const N: usize> StackStr<N> {
         self.buf[0..len].fill(value);
     }
 
-    /// Form a [`StringStr`] from an array and a length.
+    /// Form a [`StackStr`] from an array and a length.
     /// 
     /// The `len` argument is the number of bytes.
     /// 

@@ -12,6 +12,7 @@ pub enum Error {
     Windows(::windows::core::Error),
     #[cfg(windows)]
     MultipleDevInterfaces(usize),
+    #[cfg(windows)]
     #[cfg(unix)]
     Udev(crate::unix::UdevError),
     #[cfg(unix)]
@@ -44,6 +45,8 @@ impl std::error::Error for Error {}
 #[derive(Debug)]
 pub enum AttachErrorKind {
     OutOfPorts,
+    #[cfg(windows)]
+    Door(crate::windows::vhci::DoorError),
     #[cfg(unix)]
     SysFs(io::Error),
 }
@@ -52,6 +55,8 @@ impl fmt::Display for AttachErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AttachErrorKind::OutOfPorts => write!(f, "Out of ports"),
+            #[cfg(windows)]
+            AttachErrorKind::Door(d) => write!(f, "Driver error: {}", d),
             #[cfg(unix)]
             AttachErrorKind::SysFs(i) => todo!()
         }

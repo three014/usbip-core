@@ -4,7 +4,7 @@ pub mod __private {
 
 use std::{ffi::c_char, str::FromStr};
 
-pub unsafe trait EncodedSize: bincode::Decode + bincode::Encode {
+pub unsafe trait EncodedSize {
     const ENCODED_SIZE_OF: usize;
 }
 
