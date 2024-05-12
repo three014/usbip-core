@@ -7,8 +7,10 @@ pub mod error2 {
     pub enum Error {
         NoFreePorts,
         PortNotInUse,
-        DriverNotLoaded,
+        DriverNotFound,
         WriteSys(std::io::Error),
+        #[cfg(windows)]
+        MultipleDevInterfaces(usize),
     }
 
     impl From<std::io::Error> for Error {
@@ -22,11 +24,18 @@ pub mod error2 {
             match self {
                 Error::NoFreePorts => write!(f, "No free port on USB/IP hub"),
                 Error::PortNotInUse => write!(f, "Port not in use"),
-                Error::DriverNotLoaded => write!(f, "VHCI device not found, is the driver loaded?"),
+                Error::DriverNotFound => write!(f, "VHCI device not found, is the driver loaded?"),
                 Error::WriteSys(io) => write!(f, "Driver I/O error: {io}"),
+                #[cfg(windows)]
+                Error::MultipleDevInterfaces(num) => write!(
+                    f,
+                    "Multiple instances of VHCI device interface found ({num})"
+                ),
             }
         }
     }
+
+    impl std::error::Error for Error {}
 }
 
 pub(crate) mod error;
@@ -166,7 +175,6 @@ pub struct VhciDriver2 {
 }
 
 impl VhciDriver2 {
-
     /// Creates a new [`VhciDriver2`] from
     /// a platform-specific driver implementation.
     #[inline(always)]
@@ -238,4 +246,3 @@ impl VhciDriver2 {
         self.get().imported_devices()
     }
 }
-

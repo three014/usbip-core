@@ -53,6 +53,8 @@ use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 use bincode::de::read::Reader as _;
 use bincode::{Decode, Encode};
 use bitflags::bitflags;
+use num_derive::{FromPrimitive, ToPrimitive};
+use num_traits::{FromPrimitive, ToPrimitive};
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, HANDLE, WIN32_ERROR};
 use windows::Win32::Storage::FileSystem::{FILE_READ_DATA, FILE_WRITE_DATA};
 use windows::Win32::System::Ioctl::{
@@ -67,6 +69,13 @@ use crate::{DeviceSpeed, BUS_ID_SIZE};
 
 use super::consts::{NI_MAXHOST, NI_MAXSERV};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive)]
+enum DriverError {
+    InvalidAbi = 0xE1000008,
+    IncompatibleProtocolVersion = 0xE1000005,
+    DevNotConnected = 0x8007048F,
+}
+
 pub trait IoControl<T> {
     type Input: EncodedSize + bincode::Encode;
     // How to distiguish between containers and the actual type???
@@ -78,7 +87,7 @@ pub trait IoControl<T> {
         ControlCode(
             DeviceType::Unknown,
             RequiredAccess::READ_WRITE_DATA,
-            <Self as IoControl<T>>::FUNCTION.as_u32(),
+            <Self as IoControl<T>>::FUNCTION.to_u32().unwrap(),
             TransferMethod::Buffered,
         )
     }
@@ -90,19 +99,13 @@ pub trait IoControl<T> {
     fn recv<D: bincode::de::Decoder>(decoder: &mut D) -> Result<T, bincode::error::DecodeError>;
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, ToPrimitive)]
 pub enum Function {
     PluginHardware = 0x800,
     PlugoutHardware,
     GetImportedDevices,
     SetPersistent,
     GetPersistent,
-}
-
-impl Function {
-    pub const fn as_u32(&self) -> u32 {
-        *self as u32
-    }
 }
 
 pub struct DeviceLocation<'a> {
@@ -146,14 +149,12 @@ unsafe impl EncodedSize for Nothing {
 }
 
 pub struct Detach {
-    port: Port
+    port: Port,
 }
 
 impl Detach {
     pub const fn new(port: u16) -> Self {
-        Self {
-            port: Port(port)
-        }
+        Self { port: Port(port) }
     }
 }
 
@@ -161,16 +162,16 @@ impl IoControl<()> for Detach {
     type Input = Port;
     type Output = Nothing;
     const FUNCTION: Function = Function::PlugoutHardware;
-    
+
     fn send<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
-        let size = Self::Input::ENCODED_SIZE_OF as u32;
+        let size = (Self::Input::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
         size.encode(encoder)?;
         self.port.encode(encoder)
     }
-    
+
     fn recv<D: bincode::de::Decoder>(_: &mut D) -> Result<(), bincode::error::DecodeError> {
         Ok(())
     }
@@ -482,9 +483,11 @@ pub fn relay<T, I: IoControl<T>>(handle: BorrowedHandle, ioctl: I) -> Result<T, 
         }
     }
 
-    let num_items =
-        ((output.len() - core::mem::size_of::<u32>()) / I::Output::ENCODED_SIZE_OF) as u32;
-    output[0..core::mem::size_of::<u32>()].copy_from_slice(&num_items.to_le_bytes());
+    if I::Output::ENCODED_SIZE_OF != 0 {
+        let num_items =
+            ((output.len() - core::mem::size_of::<u32>()) / I::Output::ENCODED_SIZE_OF) as u32;
+        output[0..core::mem::size_of::<u32>()].copy_from_slice(&num_items.to_le_bytes());
+    }
 
     let output = bincode::decode_from_slice::<DecodeWrapper<T, I>, _>(
         &output,
@@ -496,7 +499,7 @@ pub fn relay<T, I: IoControl<T>>(handle: BorrowedHandle, ioctl: I) -> Result<T, 
 }
 
 /// Struct for keeping track of
-/// [`IoControl`] operations. 
+/// [`IoControl`] operations.
 struct Door<'a> {
     end_of_req: bool,
     handle: BorrowedHandle<'a>,
@@ -512,6 +515,14 @@ impl<'a> Door<'a> {
         }
     }
 
+    /// Performs a call to [`DeviceIoControl`], reading from `input` and writing
+    /// to `output` and using the stored handle and control code as the request.
+    /// 
+    /// Returns the number of bytes written to `output`. If `Ok(0)` is returned,
+    /// then the function is done writing data for the specific request.
+    /// Users are expected to perform repeated calls to [`Door::read_write`] 
+    /// until receiving 0 bytes, using the same buffer for input. The output
+    /// buffer should start right after where this function stopped writing to.
     fn read_write(&mut self, input: &[u8], output: &mut [u8]) -> std::io::Result<usize> {
         if self.end_of_req {
             return Ok(0);
@@ -536,10 +547,16 @@ impl<'a> Door<'a> {
         };
 
         if let Err(err) = result {
-            // We've hit a weird driver error. In the future we'll find a way to
-            // tell what the actual error is
             if usize::try_from(bytes_returned).unwrap() < core::mem::size_of::<u32>() {
-                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+                let driver_err = match DriverError::from_u32(err.code().0 as u32) {
+                    Some(DriverError::InvalidAbi) => std::io::ErrorKind::InvalidData.into(),
+                    Some(DriverError::IncompatibleProtocolVersion) => {
+                        std::io::ErrorKind::InvalidData.into()
+                    }
+                    Some(DriverError::DevNotConnected) => std::io::ErrorKind::NotConnected.into(),
+                    None => std::io::Error::other(err.message()),
+                };
+                return Err(driver_err);
             }
 
             let win32_err =

@@ -7,9 +7,7 @@ pub mod vhci {
     use std::{
         ffi::OsString,
         fs::File,
-        io::Read,
         net::{SocketAddr, ToSocketAddrs},
-        ops::Deref,
         os::windows::{
             ffi::OsStringExt,
             fs::OpenOptionsExt,
@@ -18,7 +16,6 @@ pub mod vhci {
         path::PathBuf,
     };
 
-    use bincode::error::DecodeError;
     use windows::{
         core::{GUID, PCWSTR},
         Win32::{
@@ -27,7 +24,10 @@ pub mod vhci {
         },
     };
 
-    use crate::{containers::stacktools::StackStr, vhci::base, windows::vhci::utils::ioctl};
+    use crate::{
+        vhci::{base, error2::Error},
+        windows::vhci::utils::ioctl,
+    };
 
     use super::Win32Error;
 
@@ -133,35 +133,38 @@ pub mod vhci {
                 .read(true)
                 .write(true)
                 .attributes((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
-                .open(Self::path().inspect(|path| println!("Driver path: {}", path.display()))?)?;
+                .open(Self::path()?)?;
 
             Ok(Self { handle: file })
         }
 
-        fn attach(&mut self, args: AttachArgs) -> Result<u16, DoorError> {
-            let port = ioctl::relay(self.as_handle(), ioctl::Attach::new(
-                args.into()
-            ))?;
-            
+        fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
+            let port =
+                ioctl::relay(self.as_handle(), ioctl::Attach::new(args.into())).map_err(|err| {
+                    match err {
+                        DoorError::Io(io) => Error::WriteSys(io),
+                        _ => unreachable!("Developer error in parsing data"),
+                    }
+                })?;
+
             Ok(port)
         }
 
         fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
-            let result = ioctl::relay(self.as_handle(), ioctl::Detach::new(port));
-
-            todo!()
+            ioctl::relay(self.as_handle(), ioctl::Detach::new(port)).map_err(|err| match err {
+                DoorError::Io(io) => Error::WriteSys(io),
+                _ => unreachable!("Developer error in parsing data"),
+            })
         }
 
-        fn imported_devices(&self) -> Result<WindowsImportedDevices, bincode::error::DecodeError> {
+        fn imported_devices(&self) -> crate::vhci::Result<WindowsImportedDevices> {
             let idevs = ioctl::relay(self.as_handle(), ioctl::GetImportedDevices)
                 .map_err(|err| match err {
-                    DoorError::Io(io) => bincode::error::DecodeError::Io {
-                        inner: io,
-                        additional: 0,
-                    },
-                    DoorError::Recv(recv) => recv,
-                    DoorError::Send(_) => unreachable!(),
-                })?.into_iter().collect();
+                    DoorError::Io(io) => Error::WriteSys(io),
+                    _ => unreachable!("Developer error in parsing data"),
+                })?
+                .into_iter()
+                .collect();
 
             Ok(idevs)
         }
@@ -171,13 +174,14 @@ pub mod vhci {
                 GUID_DEVINTERFACE_USB_HOST_CONTROLLER,
                 PCWSTR::null(),
                 CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
-            )?;
+            )
+            .map_err(|err| std::io::Error::from_raw_os_error(err.get().to_hresult().0))?;
             let mut p = v.split(|&elm| elm == 0).filter(|slice| !slice.is_empty());
             if let Some(path) = p.next() {
                 if p.next().is_some() {
                     // We add 2 because of the first slice and
                     // this second slice we just found.
-                    Err(crate::vhci::Error::MultipleDevInterfaces(2 + p.count()))
+                    Err(Error::MultipleDevInterfaces(2 + p.count()))
                 } else {
                     Ok(PathBuf::from(OsString::from_wide(path)))
                 }
@@ -199,25 +203,18 @@ pub mod vhci {
             })
         }
 
-        pub fn attach(&mut self, args: AttachArgs) -> Result<u16, crate::vhci::error::AttachError> {
+        pub fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
             todo!()
         }
 
+        #[inline(always)]
         pub fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
-            todo!()
+            self.inner.detach(port)
         }
 
+        #[inline(always)]
         pub fn imported_devices(&self) -> crate::vhci::Result<WindowsImportedDevices> {
-            Ok(self.inner.imported_devices().map_err(|err| match err {
-                DecodeError::Io { inner, .. } => inner,
-                _ => std::io::Error::other(err),
-            })?)
-        }
-    }
-
-    impl From<Win32Error> for crate::vhci::Error {
-        fn from(value: Win32Error) -> Self {
-            Self::Windows(value.into())
+            self.inner.imported_devices()
         }
     }
 
@@ -235,6 +232,18 @@ pub mod vhci {
             let driver = WindowsVhciDriver::open().unwrap();
 
             driver.imported_devices().unwrap();
+        }
+
+        #[test]
+        fn detach_port_one() {
+            let mut driver = WindowsVhciDriver::open().unwrap();
+
+            if let Err(err) = driver.detach(1) {
+                match err {
+                    Error::WriteSys(io) if io.kind() == std::io::ErrorKind::NotConnected => {},
+                    _ => panic!(),
+                }
+            }
         }
     }
 }
