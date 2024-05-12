@@ -9,7 +9,7 @@ pub unsafe trait EncodedSize {
 }
 
 #[allow(dead_code)]
-pub fn parse_token<'a, 'b: 'a, T>(tokens: &'a mut impl Iterator<Item = &'b str>) -> T
+pub fn parse_token<'a, 'b: 'a, T>(tokens: &'a mut impl Iterator<Item = &'b str>) -> Result<T, T::Err>
 where
     T: FromStr,
     T::Err: std::error::Error,
@@ -19,7 +19,6 @@ where
         .expect("There should be another item in the string stream")
         .trim()
         .parse()
-        .expect("Token should be valid")
 }
 
 #[inline]

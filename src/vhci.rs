@@ -1,14 +1,34 @@
 //! Ahh, the silly vhci module. This is where everything begins.
 
-mod error2 {
+pub mod error2 {
 
+    /// The error type for VHCI operations.
+    #[derive(Debug)]
     pub enum Error {
         NoFreePorts,
         PortNotInUse,
         DriverNotLoaded,
-        Io(std::io::Error)
+        WriteSys(std::io::Error),
+    }
+
+    impl From<std::io::Error> for Error {
+        fn from(value: std::io::Error) -> Self {
+            Self::WriteSys(value)
+        }
+    }
+
+    impl core::fmt::Display for Error {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Error::NoFreePorts => write!(f, "No free port on USB/IP hub"),
+                Error::PortNotInUse => write!(f, "Port not in use"),
+                Error::DriverNotLoaded => write!(f, "VHCI device not found, is the driver loaded?"),
+                Error::WriteSys(io) => write!(f, "Driver I/O error: {io}"),
+            }
+        }
     }
 }
+
 pub(crate) mod error;
 mod platform {
     #[cfg(unix)]
@@ -70,10 +90,9 @@ pub mod base {
 use core::fmt;
 use std::str::FromStr;
 
-pub use error::Error;
 pub use platform::{AttachArgs, Driver, ImportedDevice, ImportedDevices, PortRecord, STATE_PATH};
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, error2::Error>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubSpeed {
@@ -184,7 +203,7 @@ impl VhciDriver2 {
     /// On windows, this function will first attempt to establish
     /// a connection with the host.
     #[inline(always)]
-    pub fn attach(&mut self, args: AttachArgs) -> std::result::Result<u16, error::AttachError> {
+    pub fn attach(&mut self, args: AttachArgs) -> Result<u16> {
         self.get_mut().attach(args)
     }
 

@@ -24,12 +24,6 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<Error> for crate::vhci::Error {
-    fn from(value: Error) -> Self {
-        crate::vhci::Error::Udev(value)
-    }
-}
-
 #[derive(Debug)]
 pub enum TryFromDeviceError {
     Io(std::io::Error),
@@ -110,12 +104,6 @@ impl std::fmt::Display for ParseAttributeError {
 }
 
 impl std::error::Error for ParseAttributeError {}
-
-impl From<ParseAttributeError> for crate::vhci::Error {
-    fn from(value: ParseAttributeError) -> Self {
-        Self::Udev(value.into())
-    }
-}
 
 impl From<ParseAttributeError> for Error {
     fn from(value: ParseAttributeError) -> Self {

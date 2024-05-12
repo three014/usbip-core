@@ -162,7 +162,7 @@ impl<const N: usize> Write for StackStr<N> {
         } else {
             let len = self.len();
             let u8_buf = crate::util::cast_cchar_to_u8_mut(&mut self.buf);
-            u8_buf[len..s.len()].copy_from_slice(s.as_bytes());
+            u8_buf[len..len + s.len()].copy_from_slice(s.as_bytes());
             self.len += s.len();
             Ok(())
         }
