@@ -203,8 +203,9 @@ pub mod vhci {
             })
         }
 
+        #[inline(always)]
         pub fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
-            todo!()
+            self.inner.attach(args)
         }
 
         #[inline(always)]
@@ -240,7 +241,7 @@ pub mod vhci {
 
             if let Err(err) = driver.detach(1) {
                 match err {
-                    Error::WriteSys(io) if io.kind() == std::io::ErrorKind::NotConnected => {},
+                    Error::WriteSys(io) if io.kind() == std::io::ErrorKind::NotConnected => {}
                     _ => panic!(),
                 }
             }

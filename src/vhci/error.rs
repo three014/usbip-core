@@ -5,7 +5,7 @@ use std::{io, net::TcpStream};
 use std::net::SocketAddr;
 
 #[derive(Debug)]
-pub enum Error {
+enum Error {
     Io(io::Error),
     AttachFailed(AttachError),
     #[cfg(windows)]
@@ -29,7 +29,10 @@ impl fmt::Display for Error {
             #[cfg(windows)]
             Error::Windows(_) => todo!(),
             #[cfg(windows)]
-            Error::MultipleDevInterfaces(num) => write!(f, "Multiple instances of VHCI device interface found ({num})"),
+            Error::MultipleDevInterfaces(num) => write!(
+                f,
+                "Multiple instances of VHCI device interface found ({num})"
+            ),
             #[cfg(unix)]
             Error::Udev(u) => write!(f, "VHCI Udev (is driver loaded?): {u}"),
             #[cfg(unix)]
@@ -58,7 +61,7 @@ impl fmt::Display for AttachErrorKind {
             #[cfg(windows)]
             AttachErrorKind::Door(d) => write!(f, "Driver error: {}", d),
             #[cfg(unix)]
-            AttachErrorKind::SysFs(i) => todo!()
+            AttachErrorKind::SysFs(i) => todo!(),
         }
     }
 }

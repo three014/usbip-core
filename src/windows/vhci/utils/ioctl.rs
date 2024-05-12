@@ -1,4 +1,5 @@
 //! # Goals for this module
+//! 
 //! I want to define some sort of interface that specifies
 //! an IoCtl function, control code, and a data layout suitable
 //! for both the input/output.
@@ -8,6 +9,7 @@
 //! "hacky" formats and tricks.
 //!
 //! # Motivation
+//! 
 //! Every function from the usbip-win2 userspace library
 //! share a huge similarity in that they interact with
 //! the DeviceIoControl windows syscall. It makes me
@@ -20,6 +22,7 @@
 //! its usable form).
 //!
 //! # Current work
+//! 
 //! As of 5/8/2024, there is a [`IoControl`] trait that
 //! defines a module's [`ControlCode`] based on the given
 //! [`Function`]. Each module can also implement a separate
@@ -48,6 +51,7 @@ use std::ffi::c_char;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
+use std::ops::Not;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 
 use bincode::de::read::Reader as _;
@@ -69,6 +73,9 @@ use crate::{DeviceSpeed, BUS_ID_SIZE};
 
 use super::consts::{NI_MAXHOST, NI_MAXSERV};
 
+/// A non-exhaustive list of the error codes
+/// that can be returned by the vhci driver.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive)]
 enum DriverError {
     InvalidAbi = 0xE1000008,
@@ -78,7 +85,6 @@ enum DriverError {
 
 pub trait IoControl<T> {
     type Input: EncodedSize + bincode::Encode;
-    // How to distiguish between containers and the actual type???
     type Output: EncodedSize + bincode::Decode;
 
     const FUNCTION: Function;
@@ -427,75 +433,137 @@ impl From<std::io::Error> for DoorError {
     }
 }
 
+/// Helper struct for vhci ioctl objects.
+/// 
+/// Allows [`IoControl::Input`] to be
+/// encoded into bincode without needing the
+/// [`IoControl`] object to implement [`bincode::Encode`]
+/// itself.
+struct EncodeHelper<'a, T, I: IoControl<T>>(&'a I, PhantomData<&'a T>);
+
+impl<T, I: IoControl<T>> bincode::Encode for EncodeHelper<'_, T, I> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.get().send(encoder)
+    }
+}
+
+impl<'a, T, I: IoControl<T>> EncodeHelper<'a, T, I> {
+    #[inline(always)]
+    const fn new(ioctl: &'a I) -> Self {
+        Self(ioctl, PhantomData)
+    }
+
+    #[inline(always)]
+    const fn get(&self) -> &I {
+        &self.0
+    }
+}
+
+/// Helper struct for vhci ioctl objects.
+/// 
+/// Allows [`IoControl::Output`] to be 
+/// decoded by bincode without needing the
+/// [`IoControl`] object to implement [`bincode::Decode`]
+/// itself.
+struct DecodeWrapper<T, I: IoControl<T>>(T, PhantomData<I>);
+
+impl<T, I: IoControl<T>> bincode::Decode for DecodeWrapper<T, I> {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let out = I::recv(decoder)?;
+        Ok(Self::new(out))
+    }
+}
+
+impl<T, I: IoControl<T>> DecodeWrapper<T, I> {
+    #[inline(always)]
+    const fn new(item: T) -> Self {
+        Self(item, PhantomData)
+    }
+
+    #[inline(always)]
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 pub fn relay<T, I: IoControl<T>>(handle: BorrowedHandle, ioctl: I) -> Result<T, DoorError> {
-    struct EncodeHelper<'a, T, I: IoControl<T>>(&'a I, PhantomData<&'a T>);
-    impl<T, I: IoControl<T>> bincode::Encode for EncodeHelper<'_, T, I> {
-        fn encode<E: bincode::enc::Encoder>(
-            &self,
-            encoder: &mut E,
-        ) -> Result<(), bincode::error::EncodeError> {
-            self.0.send(encoder)
-        }
-    }
-
-    struct DecodeWrapper<T, I: IoControl<T>>(T, PhantomData<I>);
-    impl<T, I: IoControl<T>> bincode::Decode for DecodeWrapper<T, I> {
-        fn decode<D: bincode::de::Decoder>(
-            decoder: &mut D,
-        ) -> Result<Self, bincode::error::DecodeError> {
-            let out = I::recv(decoder)?;
-            Ok(Self(out, PhantomData))
-        }
-    }
-
+    let config = crate::net::bincode_config().with_little_endian();
     let code = I::ctrl_code().into_u32();
     let mut door = Door::new(handle, code);
-    let input = bincode::encode_to_vec(
-        EncodeHelper(&ioctl, PhantomData),
-        crate::net::bincode_config().with_little_endian(),
-    )?;
-    let mut output = Vec::<u8>::new();
-    let mut start = 0;
 
-    for num_ioctl_devs in BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 2) {
-        output.resize(
-            I::Output::ENCODED_SIZE_OF
-                .checked_mul(num_ioctl_devs)
-                .unwrap()
-                .checked_add(core::mem::size_of::<u32>())
-                .unwrap(),
-            0,
-        );
+    // Flow:
+    //             Is Input::encoded_size == 0?  -------------
+    //                           |                           |
+    //                           |                           |
+    //                           V                           V
+    //             let input = None;         let input = bincode::encode_to_vec(EncodeHelper::new(&ioctl), config)?;
+    //
+    //
+    //
+    //             Is Output::encoded_size == 0?  ------------
+    //                          |                            |
+    //                          |                            |
+    //                          V                            V
+    //             let output = None;        let output = Vec::<u8>::new();
+    //             No loop                   Do loop
 
-        match door.read_write(&input, &mut output[start..]) {
-            Ok(0) => {
-                output.resize(start, 0);
-                break;
-            }
-            Ok(bytes_read) => {
-                start += bytes_read;
-            }
-            Err(err) => {
-                if err.kind() != std::io::ErrorKind::WriteZero {
-                    return Err(err.into());
+    let input = I::Input::is_zero_sized()
+        .not()
+        .then(|| bincode::encode_to_vec(EncodeHelper::new(&ioctl), config))
+        .transpose()?;
+    let input_ref = input.as_ref().map(|buf| buf.as_slice());
+
+    if !I::Output::is_zero_sized() {
+        let mut output = Vec::<u8>::new();
+        let mut start = 0;
+        for num_ioctl_devs in BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 2) {
+            output.resize(
+                I::Output::ENCODED_SIZE_OF
+                    .checked_mul(num_ioctl_devs)
+                    .unwrap()
+                    .checked_add(core::mem::size_of::<u32>())
+                    .unwrap(),
+                0,
+            );
+
+            match door.read_write(input_ref, Some(&mut output[start..])) {
+                Ok(0) => {
+                    output.resize(start, 0);
+                    break;
+                }
+                Ok(bytes_read) => {
+                    start += bytes_read;
+                }
+                Err(err) => {
+                    if err.kind() != std::io::ErrorKind::WriteZero {
+                        return Err(err.into());
+                    }
                 }
             }
         }
-    }
 
-    if I::Output::ENCODED_SIZE_OF != 0 {
         let num_items =
             ((output.len() - core::mem::size_of::<u32>()) / I::Output::ENCODED_SIZE_OF) as u32;
         output[0..core::mem::size_of::<u32>()].copy_from_slice(&num_items.to_le_bytes());
+
+        let output = bincode::decode_from_slice::<DecodeWrapper<T, I>, _>(
+            &output,
+            crate::net::bincode_config().with_little_endian(),
+        )?
+        .0;
+
+        Ok(output.into_inner())
+    } else {
+        door.read_write(input_ref, None)?;
+
+        let output = bincode::decode_from_slice::<DecodeWrapper<T, I>, _>(&[], config)?.0;
+        Ok(output.into_inner())
     }
-
-    let output = bincode::decode_from_slice::<DecodeWrapper<T, I>, _>(
-        &output,
-        crate::net::bincode_config().with_little_endian(),
-    )?
-    .0;
-
-    Ok(output.0)
 }
 
 /// Struct for keeping track of
@@ -517,19 +585,31 @@ impl<'a> Door<'a> {
 
     /// Performs a call to [`DeviceIoControl`], reading from `input` and writing
     /// to `output` and using the stored handle and control code as the request.
-    /// 
+    ///
     /// Returns the number of bytes written to `output`. If `Ok(0)` is returned,
     /// then the function is done writing data for the specific request.
-    /// Users are expected to perform repeated calls to [`Door::read_write`] 
+    /// Users are expected to perform repeated calls to [`Door::read_write`]
     /// until receiving 0 bytes, using the same buffer for input. The output
     /// buffer should start right after where this function stopped writing to.
-    fn read_write(&mut self, input: &[u8], output: &mut [u8]) -> std::io::Result<usize> {
+    fn read_write(
+        &mut self,
+        input: Option<&[u8]>,
+        output: Option<&mut [u8]>,
+    ) -> std::io::Result<usize> {
         if self.end_of_req {
             return Ok(0);
         }
 
         let code = self.code;
         let handle = HANDLE(self.handle.as_raw_handle() as isize);
+        let input_len = input
+            .as_ref()
+            .map(|buf| buf.len() as u32)
+            .unwrap_or_default();
+        let output_len = output
+            .as_ref()
+            .map(|buf| buf.len() as u32)
+            .unwrap_or_default();
         let mut bytes_returned: u32 = 0;
 
         // SAFETY: Both `input` and `output` are valid slices.
@@ -537,10 +617,10 @@ impl<'a> Door<'a> {
             DeviceIoControl(
                 handle,
                 code,
-                Some(input.as_ptr().cast()),
-                input.len() as u32,
-                Some(output.as_mut_ptr().cast()),
-                output.len() as u32,
+                input.map(|buf| buf.as_ptr().cast()),
+                input_len,
+                output.map(|buf| buf.as_mut_ptr().cast()),
+                output_len,
                 Some(core::ptr::addr_of_mut!(bytes_returned)),
                 None,
             )

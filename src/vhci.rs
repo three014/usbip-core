@@ -103,6 +103,7 @@ pub use platform::{AttachArgs, Driver, ImportedDevice, ImportedDevices, PortReco
 
 pub type Result<T> = std::result::Result<T, error2::Error>;
 
+/// The VHCI driver's supported USB device speeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubSpeed {
     High = 0,
@@ -163,18 +164,13 @@ impl std::error::Error for ParseHubSpeedError {}
 /// An object that provides an interface
 /// to the vhci driver.
 ///
-/// # Platform-specific behavior
-/// On Unix, the vhci_hcd kernel module needs to be loaded
-/// to use the driver, and many actions require superuser
-/// permissions.
-///
-/// On Windows, the usbip-win2 ude driver needs to be
-/// installed.
-pub struct VhciDriver2 {
+/// The platform's vhci driver needs to be installed
+/// and loaded for the driver operations to succeed.
+pub struct VhciDriver {
     inner: Driver,
 }
 
-impl VhciDriver2 {
+impl VhciDriver {
     /// Creates a new [`VhciDriver2`] from
     /// a platform-specific driver implementation.
     #[inline(always)]

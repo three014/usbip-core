@@ -4,8 +4,21 @@ pub mod __private {
 
 use std::{ffi::c_char, str::FromStr};
 
+/// Describes the encoded size of the object
+/// when written to/read from a [`bincode`] buffer.
+/// 
+/// # Safety
+/// 
+/// Consumers of this trait must correctly report
+/// the size of the object when encoded into/decoded
+/// from [`bincode`]. Furthermore, the object's
+/// encoded size must be known at compile time.
 pub unsafe trait EncodedSize {
     const ENCODED_SIZE_OF: usize;
+
+    fn is_zero_sized() -> bool {
+        <Self as EncodedSize>::ENCODED_SIZE_OF == 0
+    }
 }
 
 #[allow(dead_code)]
