@@ -112,6 +112,12 @@ pub mod vhci {
         }
     }
 
+    impl<'a> From<AttachArgs<'a>> for ioctl::DeviceLocation<'a> {
+        fn from(value: AttachArgs<'a>) -> Self {
+            Self::new(value.host, value.bus_id)
+        }
+    }
+
     struct InnerDriver {
         handle: File,
     }
@@ -133,22 +139,21 @@ pub mod vhci {
         }
 
         fn attach(&mut self, args: AttachArgs) -> Result<u16, DoorError> {
-            let record = ioctl::PortRecord {
-                port: 0, // Not read by DeviceIoControl
-                busid: StackStr::try_from(args.bus_id).unwrap(),
-                service: StackStr::try_from(format_args!("{}", args.host.port())).unwrap(),
-                host: StackStr::try_from(format_args!("{}", args.host.ip())).unwrap()
-            };
-
-            let port = ioctl::Door::relay(self.as_handle(), ioctl::Attach::new(
-                &record
+            let port = ioctl::relay(self.as_handle(), ioctl::Attach::new(
+                args.into()
             ))?;
             
             Ok(port)
         }
 
+        fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
+            let result = ioctl::relay(self.as_handle(), ioctl::Detach::new(port));
+
+            todo!()
+        }
+
         fn imported_devices(&self) -> Result<WindowsImportedDevices, bincode::error::DecodeError> {
-            let idevs = ioctl::Door::relay(self.as_handle(), ioctl::GetImportedDevices)
+            let idevs = ioctl::relay(self.as_handle(), ioctl::GetImportedDevices)
                 .map_err(|err| match err {
                     DoorError::Io(io) => bincode::error::DecodeError::Io {
                         inner: io,

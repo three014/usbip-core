@@ -12,7 +12,7 @@ pub enum Error {
     Windows(::windows::core::Error),
     #[cfg(windows)]
     MultipleDevInterfaces(usize),
-    #[cfg(windows)]
+    //#[cfg(windows)]
     #[cfg(unix)]
     Udev(crate::unix::UdevError),
     #[cfg(unix)]

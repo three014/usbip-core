@@ -1,5 +1,14 @@
 //! Ahh, the silly vhci module. This is where everything begins.
 
+mod error2 {
+
+    pub enum Error {
+        NoFreePorts,
+        PortNotInUse,
+        DriverNotLoaded,
+        Io(std::io::Error)
+    }
+}
 pub(crate) mod error;
 mod platform {
     #[cfg(unix)]

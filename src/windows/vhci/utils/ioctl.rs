@@ -46,11 +46,12 @@
 use core::fmt;
 use std::ffi::c_char;
 use std::marker::PhantomData;
+use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 
 use bincode::de::read::Reader as _;
-use bincode::{impl_borrow_decode, Decode, Encode};
+use bincode::{Decode, Encode};
 use bitflags::bitflags;
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, HANDLE, WIN32_ERROR};
 use windows::Win32::Storage::FileSystem::{FILE_READ_DATA, FILE_WRITE_DATA};
@@ -104,15 +105,84 @@ impl Function {
     }
 }
 
+pub struct DeviceLocation<'a> {
+    host: SocketAddr,
+    bus_id: &'a str,
+}
+
+unsafe impl EncodedSize for DeviceLocation<'_> {
+    const ENCODED_SIZE_OF: usize = PortRecord::ENCODED_SIZE_OF;
+}
+
+impl bincode::Encode for DeviceLocation<'_> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        PortRecord {
+            port: 0,
+            busid: StackStr::try_from(self.bus_id)
+                .map_err(|err| bincode::error::EncodeError::UnexpectedEnd)?,
+            service: StackStr::try_from(format_args!("{}", self.host.port()))
+                .expect("converting a port number into a 32 byte stack string"),
+            host: StackStr::try_from(format_args!("{}", self.host.ip()))
+                .expect("converting ip address to 1025 byte stack str"),
+        }
+        .encode(encoder)
+    }
+}
+
+impl<'a> DeviceLocation<'a> {
+    pub const fn new(host: SocketAddr, bus_id: &'a str) -> Self {
+        Self { host, bus_id }
+    }
+}
+
+#[derive(bincode::Decode)]
+pub struct Nothing;
+
+unsafe impl EncodedSize for Nothing {
+    const ENCODED_SIZE_OF: usize = 0;
+}
+
+pub struct Detach {
+    port: Port
+}
+
+impl Detach {
+    pub const fn new(port: u16) -> Self {
+        Self {
+            port: Port(port)
+        }
+    }
+}
+
+impl IoControl<()> for Detach {
+    type Input = Port;
+    type Output = Nothing;
+    const FUNCTION: Function = Function::PlugoutHardware;
+    
+    fn send<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        let size = Self::Input::ENCODED_SIZE_OF as u32;
+        size.encode(encoder)?;
+        self.port.encode(encoder)
+    }
+    
+    fn recv<D: bincode::de::Decoder>(_: &mut D) -> Result<(), bincode::error::DecodeError> {
+        Ok(())
+    }
+}
+
 pub struct Attach<'a> {
-    record: &'a PortRecord,
+    location: DeviceLocation<'a>,
 }
 
 impl<'a> Attach<'a> {
-    pub const fn new(record: &'a PortRecord) -> Self {
-        Self {
-            record
-        }
+    pub const fn new(location: DeviceLocation<'a>) -> Self {
+        Self { location }
     }
 }
 
@@ -141,10 +211,9 @@ unsafe impl EncodedSize for Port {
     const ENCODED_SIZE_OF: usize = core::mem::size_of::<i32>();
 }
 
-impl IoControl<u16> for Attach<'_> {
-    type Input = PortRecord;
+impl<'a> IoControl<u16> for Attach<'a> {
+    type Input = DeviceLocation<'a>;
     type Output = Port;
-
     const FUNCTION: Function = Function::PluginHardware;
 
     fn send<E: bincode::enc::Encoder>(
@@ -153,7 +222,7 @@ impl IoControl<u16> for Attach<'_> {
     ) -> Result<(), bincode::error::EncodeError> {
         let size_of = (Self::Input::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
         size_of.encode(encoder)?;
-        self.record.encode(encoder)?;
+        self.location.encode(encoder)?;
         Ok(())
     }
 
@@ -207,8 +276,6 @@ impl bincode::Decode for PortRecord {
         })
     }
 }
-
-impl_borrow_decode!(PortRecord);
 
 impl bincode::Encode for PortRecord {
     fn encode<E: bincode::enc::Encoder>(
@@ -359,96 +426,99 @@ impl From<std::io::Error> for DoorError {
     }
 }
 
-pub struct Door {
-    end_of_req: bool,
+pub fn relay<T, I: IoControl<T>>(handle: BorrowedHandle, ioctl: I) -> Result<T, DoorError> {
+    struct EncodeHelper<'a, T, I: IoControl<T>>(&'a I, PhantomData<&'a T>);
+    impl<T, I: IoControl<T>> bincode::Encode for EncodeHelper<'_, T, I> {
+        fn encode<E: bincode::enc::Encoder>(
+            &self,
+            encoder: &mut E,
+        ) -> Result<(), bincode::error::EncodeError> {
+            self.0.send(encoder)
+        }
+    }
+
+    struct DecodeWrapper<T, I: IoControl<T>>(T, PhantomData<I>);
+    impl<T, I: IoControl<T>> bincode::Decode for DecodeWrapper<T, I> {
+        fn decode<D: bincode::de::Decoder>(
+            decoder: &mut D,
+        ) -> Result<Self, bincode::error::DecodeError> {
+            let out = I::recv(decoder)?;
+            Ok(Self(out, PhantomData))
+        }
+    }
+
+    let code = I::ctrl_code().into_u32();
+    let mut door = Door::new(handle, code);
+    let input = bincode::encode_to_vec(
+        EncodeHelper(&ioctl, PhantomData),
+        crate::net::bincode_config().with_little_endian(),
+    )?;
+    let mut output = Vec::<u8>::new();
+    let mut start = 0;
+
+    for num_ioctl_devs in BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 2) {
+        output.resize(
+            I::Output::ENCODED_SIZE_OF
+                .checked_mul(num_ioctl_devs)
+                .unwrap()
+                .checked_add(core::mem::size_of::<u32>())
+                .unwrap(),
+            0,
+        );
+
+        match door.read_write(&input, &mut output[start..]) {
+            Ok(0) => {
+                output.resize(start, 0);
+                break;
+            }
+            Ok(bytes_read) => {
+                start += bytes_read;
+            }
+            Err(err) => {
+                if err.kind() != std::io::ErrorKind::WriteZero {
+                    return Err(err.into());
+                }
+            }
+        }
+    }
+
+    let num_items =
+        ((output.len() - core::mem::size_of::<u32>()) / I::Output::ENCODED_SIZE_OF) as u32;
+    output[0..core::mem::size_of::<u32>()].copy_from_slice(&num_items.to_le_bytes());
+
+    let output = bincode::decode_from_slice::<DecodeWrapper<T, I>, _>(
+        &output,
+        crate::net::bincode_config().with_little_endian(),
+    )?
+    .0;
+
+    Ok(output.0)
 }
 
-impl Door {
-    const fn new() -> Self {
-        Self { end_of_req: false }
+/// Struct for keeping track of
+/// [`IoControl`] operations. 
+struct Door<'a> {
+    end_of_req: bool,
+    handle: BorrowedHandle<'a>,
+    code: u32,
+}
+
+impl<'a> Door<'a> {
+    const fn new(handle: BorrowedHandle<'a>, code: u32) -> Self {
+        Self {
+            end_of_req: false,
+            handle,
+            code,
+        }
     }
 
-    pub fn relay<T, I: IoControl<T>>(handle: BorrowedHandle, ioctl: I) -> Result<T, DoorError> {
-        struct EncodeHelper<'a, T, I: IoControl<T>>(&'a I, PhantomData<&'a T>);
-        impl<T, I: IoControl<T>> bincode::Encode for EncodeHelper<'_, T, I> {
-            fn encode<E: bincode::enc::Encoder>(
-                &self,
-                encoder: &mut E,
-            ) -> Result<(), bincode::error::EncodeError> {
-                self.0.send(encoder)
-            }
-        }
-
-        struct DecodeWrapper<T, I: IoControl<T>>(T, PhantomData<I>);
-        impl<T, I: IoControl<T>> bincode::Decode for DecodeWrapper<T, I> {
-            fn decode<D: bincode::de::Decoder>(
-                decoder: &mut D,
-            ) -> Result<Self, bincode::error::DecodeError> {
-                let out = I::recv(decoder)?;
-                Ok(Self(out, PhantomData))
-            }
-        }
-
-        let mut door = Door::new();
-        let code = I::ctrl_code().into_u32();
-        let handle = HANDLE(handle.as_raw_handle() as isize);
-        let input = bincode::encode_to_vec(
-            EncodeHelper(&ioctl, PhantomData),
-            crate::net::bincode_config().with_little_endian(),
-        )?;
-        let mut output = Vec::<u8>::new();
-        let mut start = 0;
-
-        for num_ioctl_devs in BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 2) {
-            output.resize(
-                I::Output::ENCODED_SIZE_OF
-                    .checked_mul(num_ioctl_devs)
-                    .unwrap()
-                    .checked_add(core::mem::size_of::<u32>())
-                    .unwrap(),
-                0,
-            );
-
-            match door.read_write(handle, code, &input, &mut output[start..]) {
-                Ok(0) => {
-                    output.resize(start, 0);
-                    break;
-                }
-                Ok(bytes_read) => {
-                    start += bytes_read;
-                }
-                Err(err) => {
-                    if err.kind() != std::io::ErrorKind::WriteZero {
-                        return Err(err.into());
-                    }
-                }
-            }
-        }
-
-        let num_items =
-            ((output.len() - core::mem::size_of::<u32>()) / I::Output::ENCODED_SIZE_OF) as u32;
-        output[0..core::mem::size_of::<u32>()].copy_from_slice(&num_items.to_le_bytes());
-
-        let output = bincode::decode_from_slice::<DecodeWrapper<T, I>, _>(
-            &output,
-            crate::net::bincode_config().with_little_endian(),
-        )?
-        .0;
-
-        Ok(output.0)
-    }
-
-    fn read_write(
-        &mut self,
-        handle: HANDLE,
-        code: u32,
-        input: &[u8],
-        output: &mut [u8],
-    ) -> std::io::Result<usize> {
+    fn read_write(&mut self, input: &[u8], output: &mut [u8]) -> std::io::Result<usize> {
         if self.end_of_req {
             return Ok(0);
         }
 
+        let code = self.code;
+        let handle = HANDLE(self.handle.as_raw_handle() as isize);
         let mut bytes_returned: u32 = 0;
 
         // SAFETY: Both `input` and `output` are valid slices.
@@ -466,6 +536,8 @@ impl Door {
         };
 
         if let Err(err) = result {
+            // We've hit a weird driver error. In the future we'll find a way to
+            // tell what the actual error is
             if usize::try_from(bytes_returned).unwrap() < core::mem::size_of::<u32>() {
                 return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
             }
