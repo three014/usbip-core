@@ -15,11 +15,7 @@ use std::{ffi::c_char, str::FromStr};
 /// encoded size must be known at compile time.
 pub unsafe trait EncodedSize {
     const ENCODED_SIZE_OF: usize;
-
-    #[inline]
-    fn is_zero_sized() -> bool {
-        <Self as EncodedSize>::ENCODED_SIZE_OF == 0
-    }
+    const IS_ZERO_SIZED: bool = <Self as EncodedSize>::ENCODED_SIZE_OF == 0;
 }
 
 #[allow(dead_code)]

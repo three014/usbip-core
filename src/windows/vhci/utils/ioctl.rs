@@ -47,15 +47,17 @@
 //! for my current model.
 
 use core::fmt;
-use std::ffi::c_char;
+use std::ffi::{c_char, OsStr, OsString};
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::ops::Not;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 
 use bincode::de::read::Reader as _;
-use bincode::{Decode, Encode};
+use bincode::de::read::{BorrowReader, Reader};
+use bincode::{impl_borrow_decode, Decode, Encode};
 use bitflags::bitflags;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
@@ -90,11 +92,16 @@ enum DriverError {
 /// code, the input and output data types, as well
 /// as how those types are to be encoded/decoded
 /// in respect to the [`DeviceIoControl`].
-pub trait IoControl {
+pub trait IoControl
+where
+    Self::Send: EncodedSize + bincode::Encode,
+    Self::Recv: EncodedSize + bincode::Decode,
+    for<'a> Self::Recv: bincode::BorrowDecode<'a>,
+{
     /// The object that will be sent to [`DeviceIoControl`].
-    type Send: EncodedSize + bincode::Encode;
+    type Send;
     /// The object that [`DeviceIoControl`] will return.
-    type Recv: EncodedSize + bincode::Decode;
+    type Recv;
 
     type Output;
 
@@ -243,6 +250,8 @@ impl bincode::Encode for Port {
     }
 }
 
+impl_borrow_decode!(Port);
+
 unsafe impl EncodedSize for Port {
     const ENCODED_SIZE_OF: usize = core::mem::size_of::<i32>();
 }
@@ -343,7 +352,15 @@ impl IoControl for GetImportedDevices {
     fn recv<D: bincode::de::Decoder>(
         decoder: &mut D,
     ) -> Result<Self::Output, bincode::error::DecodeError> {
-        let len = u32::decode(decoder)? as usize;
+        // DeviceIoControl writes the a u32 value to the output
+        // buffer before writing any actual data. This u32 value
+        // is the total size of the output data, aka "bytes written".
+        //
+        // Therefore, we can subtract sizeof::<u32>() from the value
+        // and divide by the size of a single Self::Recv object, which
+        // should give us the number of objects in this buffer.
+        let len = (u32::decode(decoder)? as usize - core::mem::size_of::<u32>())
+            / Self::Recv::ENCODED_SIZE_OF;
         let mut buf = Vec::with_capacity(len);
 
         decoder.claim_container_read::<[u8; Self::Recv::ENCODED_SIZE_OF]>(len)?;
@@ -362,12 +379,7 @@ impl IoControl for GetImportedDevices {
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
-        SizeOf(
-            (Self::Recv::ENCODED_SIZE_OF + core::mem::size_of::<u32>())
-                .try_into()
-                .unwrap(),
-        )
-        .encode(encoder)
+        SizeOf((Self::Recv::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32).encode(encoder)
     }
 }
 
@@ -435,17 +447,29 @@ impl bincode::Decode for ImportedDevice {
     }
 }
 
+impl_borrow_decode!(ImportedDevice);
+
 pub struct OwnedDeviceLocation {
     host: SocketAddr,
     bus_id: StackStr<BUS_ID_SIZE>,
 }
 
 #[derive(bincode::Decode, bincode::Encode)]
-#[repr(transparent)]
+#[repr(C)]
 pub struct WideChar(u16);
 
 unsafe impl EncodedSize for WideChar {
     const ENCODED_SIZE_OF: usize = core::mem::size_of::<u16>();
+}
+
+struct WideStr(OsString);
+
+impl bincode::Decode for WideStr {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        todo!()
+    }
 }
 
 pub struct GetPersistentDevices;
@@ -456,16 +480,15 @@ impl IoControl for GetPersistentDevices {
     type Output = Vec<OwnedDeviceLocation>;
     const FUNCTION: Function = Function::GetPersistent;
 
-    fn send<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        todo!()
+    fn send<E: bincode::enc::Encoder>(&self, _: &mut E) -> Result<(), bincode::error::EncodeError> {
+        Ok(())
     }
 
     fn recv<D: bincode::de::Decoder>(
         decoder: &mut D,
     ) -> Result<Self::Output, bincode::error::DecodeError> {
+        let buf = WideStr::decode(decoder)?;
+
         todo!()
     }
 }
@@ -575,13 +598,13 @@ pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output
     //             let output = None;        let output = Vec::<u8>::new();
     //             No loop                   Do loop
 
-    let input = I::Send::is_zero_sized()
+    let input = I::Send::IS_ZERO_SIZED
         .not()
         .then(|| bincode::encode_to_vec(EncodeHelper(&ioctl), config))
         .transpose()?;
     let input_ref = input.as_ref().map(|buf| buf.as_slice());
 
-    if !I::Recv::is_zero_sized() {
+    if !I::Recv::IS_ZERO_SIZED {
         let mut output = Vec::<u8>::new();
         let mut start = 0;
         for num_ioctl_devs in BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 2) {
@@ -596,6 +619,15 @@ pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output
 
             match door.read_write(input_ref, Some(&mut output[start..])) {
                 Ok(0) => {
+                    // Door's read_write implementation requires that we 
+                    // call until we get Ok(0), which is at least two
+                    // times due to Door setting it's completion flag after
+                    // a call to DeviceIoControl.
+                    //
+                    // Before we leave this loop, we have to first make 
+                    // a trip to Ok(bytes_read) and correct the value of
+                    // start no matter what. Therefore, this operation
+                    // here will give us the correct length.
                     output.resize(start, 0);
                     break;
                 }
@@ -609,10 +641,6 @@ pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output
                 }
             }
         }
-
-        let num_items =
-            ((output.len() - core::mem::size_of::<u32>()) / I::Recv::ENCODED_SIZE_OF) as u32;
-        output[0..core::mem::size_of::<u32>()].copy_from_slice(&num_items.to_le_bytes());
 
         let output = bincode::decode_from_slice::<DecodeWrapper<I>, _>(
             &output,
