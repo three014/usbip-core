@@ -1,5 +1,5 @@
 //! # Goals for this module
-//! 
+//!
 //! I want to define some sort of interface that specifies
 //! an IoCtl function, control code, and a data layout suitable
 //! for both the input/output.
@@ -9,7 +9,7 @@
 //! "hacky" formats and tricks.
 //!
 //! # Motivation
-//! 
+//!
 //! Every function from the usbip-win2 userspace library
 //! share a huge similarity in that they interact with
 //! the DeviceIoControl windows syscall. It makes me
@@ -22,7 +22,7 @@
 //! its usable form).
 //!
 //! # Current work
-//! 
+//!
 //! As of 5/8/2024, there is a [`IoControl`] trait that
 //! defines a module's [`ControlCode`] based on the given
 //! [`Function`]. Each module can also implement a separate
@@ -83,17 +83,29 @@ enum DriverError {
     DevNotConnected = 0x8007048F,
 }
 
-pub trait IoControl<T> {
-    type Input: EncodedSize + bincode::Encode;
-    type Output: EncodedSize + bincode::Decode;
+/// The main trait for defining an ioctl function
+/// for the vhci driver.
+///
+/// Consumers of this trait will define the function
+/// code, the input and output data types, as well
+/// as how those types are to be encoded/decoded
+/// in respect to the [`DeviceIoControl`].
+pub trait IoControl {
+    /// The object that will be sent to [`DeviceIoControl`].
+    type Send: EncodedSize + bincode::Encode;
+    /// The object that [`DeviceIoControl`] will return.
+    type Recv: EncodedSize + bincode::Decode;
 
+    type Output;
+
+    /// The requested ioctl function for the vhci driver.
     const FUNCTION: Function;
 
     fn ctrl_code() -> ControlCode {
         ControlCode(
             DeviceType::Unknown,
             RequiredAccess::READ_WRITE_DATA,
-            <Self as IoControl<T>>::FUNCTION.to_u32().unwrap(),
+            <Self as IoControl>::FUNCTION.to_u32().unwrap(),
             TransferMethod::Buffered,
         )
     }
@@ -102,7 +114,10 @@ pub trait IoControl<T> {
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError>;
-    fn recv<D: bincode::de::Decoder>(decoder: &mut D) -> Result<T, bincode::error::DecodeError>;
+
+    fn recv<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self::Output, bincode::error::DecodeError>;
 }
 
 #[derive(Debug, Clone, Copy, ToPrimitive)]
@@ -147,13 +162,19 @@ impl<'a> DeviceLocation<'a> {
     }
 }
 
-#[derive(bincode::Decode)]
+/// A unit struct with an encoded size of
+/// zero. Used as a marker to let [`relay`]
+/// know to not attempt to encode/decode
+/// any data.
+#[derive(bincode::Encode, bincode::Decode)]
 pub struct Nothing;
 
 unsafe impl EncodedSize for Nothing {
     const ENCODED_SIZE_OF: usize = 0;
 }
 
+/// Used to request for the vhci driver
+/// to detach a device.
 pub struct Detach {
     port: Port,
 }
@@ -164,25 +185,31 @@ impl Detach {
     }
 }
 
-impl IoControl<()> for Detach {
-    type Input = Port;
-    type Output = Nothing;
+impl IoControl for Detach {
+    type Send = Port;
+    type Recv = Nothing;
+    type Output = ();
     const FUNCTION: Function = Function::PlugoutHardware;
 
     fn send<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
-        let size = (Self::Input::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
+        let size = (Self::Send::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
         size.encode(encoder)?;
         self.port.encode(encoder)
     }
 
-    fn recv<D: bincode::de::Decoder>(_: &mut D) -> Result<(), bincode::error::DecodeError> {
+    fn recv<D: bincode::de::Decoder>(
+        _: &mut D,
+    ) -> Result<Self::Output, bincode::error::DecodeError> {
         Ok(())
     }
 }
 
+/// Used to request for the vhci driver
+/// to connect to a host and attach one
+/// of its usb devices.
 pub struct Attach<'a> {
     location: DeviceLocation<'a>,
 }
@@ -193,6 +220,8 @@ impl<'a> Attach<'a> {
     }
 }
 
+/// A helper struct for encoding/decoding
+/// a port number.
 pub struct Port(u16);
 
 impl bincode::Decode for Port {
@@ -218,22 +247,25 @@ unsafe impl EncodedSize for Port {
     const ENCODED_SIZE_OF: usize = core::mem::size_of::<i32>();
 }
 
-impl<'a> IoControl<u16> for Attach<'a> {
-    type Input = DeviceLocation<'a>;
-    type Output = Port;
+impl<'a> IoControl for Attach<'a> {
+    type Send = DeviceLocation<'a>;
+    type Recv = Port;
+    type Output = u16;
     const FUNCTION: Function = Function::PluginHardware;
 
     fn send<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
-        let size_of = (Self::Input::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
+        let size_of = (Self::Send::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
         size_of.encode(encoder)?;
         self.location.encode(encoder)?;
         Ok(())
     }
 
-    fn recv<D: bincode::de::Decoder>(decoder: &mut D) -> Result<u16, bincode::error::DecodeError> {
+    fn recv<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self::Output, bincode::error::DecodeError> {
         decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
         decoder.reader().consume(core::mem::size_of::<u32>());
         let port = Port::decode(decoder)?;
@@ -302,23 +334,24 @@ impl bincode::Encode for PortRecord {
 
 pub struct GetImportedDevices;
 
-impl IoControl<Vec<ImportedDevice>> for GetImportedDevices {
-    type Input = SizeOf;
-    type Output = ImportedDevice;
+impl IoControl for GetImportedDevices {
+    type Send = SizeOf;
+    type Recv = ImportedDevice;
+    type Output = Vec<Self::Recv>;
     const FUNCTION: Function = Function::GetImportedDevices;
 
     fn recv<D: bincode::de::Decoder>(
         decoder: &mut D,
-    ) -> Result<Vec<Self::Output>, bincode::error::DecodeError> {
+    ) -> Result<Self::Output, bincode::error::DecodeError> {
         let len = u32::decode(decoder)? as usize;
         let mut buf = Vec::with_capacity(len);
 
-        decoder.claim_container_read::<[u8; Self::Output::ENCODED_SIZE_OF]>(len)?;
+        decoder.claim_container_read::<[u8; Self::Recv::ENCODED_SIZE_OF]>(len)?;
 
         for _ in 0..len {
-            decoder.unclaim_bytes_read(Self::Output::ENCODED_SIZE_OF);
+            decoder.unclaim_bytes_read(Self::Recv::ENCODED_SIZE_OF);
 
-            let idev = Self::Output::decode(decoder)?;
+            let idev = Self::Recv::decode(decoder)?;
             buf.push(idev);
         }
 
@@ -330,7 +363,7 @@ impl IoControl<Vec<ImportedDevice>> for GetImportedDevices {
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
         SizeOf(
-            (Self::Output::ENCODED_SIZE_OF + core::mem::size_of::<u32>())
+            (Self::Recv::ENCODED_SIZE_OF + core::mem::size_of::<u32>())
                 .try_into()
                 .unwrap(),
         )
@@ -402,6 +435,41 @@ impl bincode::Decode for ImportedDevice {
     }
 }
 
+pub struct OwnedDeviceLocation {
+    host: SocketAddr,
+    bus_id: StackStr<BUS_ID_SIZE>,
+}
+
+#[derive(bincode::Decode, bincode::Encode)]
+#[repr(transparent)]
+pub struct WideChar(u16);
+
+unsafe impl EncodedSize for WideChar {
+    const ENCODED_SIZE_OF: usize = core::mem::size_of::<u16>();
+}
+
+pub struct GetPersistentDevices;
+
+impl IoControl for GetPersistentDevices {
+    type Send = Nothing;
+    type Recv = WideChar;
+    type Output = Vec<OwnedDeviceLocation>;
+    const FUNCTION: Function = Function::GetPersistent;
+
+    fn send<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        todo!()
+    }
+
+    fn recv<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self::Output, bincode::error::DecodeError> {
+        todo!()
+    }
+}
+
 #[derive(Debug)]
 pub enum DoorError {
     Send(bincode::error::EncodeError),
@@ -434,14 +502,14 @@ impl From<std::io::Error> for DoorError {
 }
 
 /// Helper struct for vhci ioctl objects.
-/// 
+///
 /// Allows [`IoControl::Input`] to be
 /// encoded into bincode without needing the
 /// [`IoControl`] object to implement [`bincode::Encode`]
 /// itself.
-struct EncodeHelper<'a, T, I: IoControl<T>>(&'a I, PhantomData<&'a T>);
+struct EncodeHelper<'a, I: IoControl>(&'a I);
 
-impl<T, I: IoControl<T>> bincode::Encode for EncodeHelper<'_, T, I> {
+impl<I: IoControl> bincode::Encode for EncodeHelper<'_, I> {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
@@ -450,12 +518,7 @@ impl<T, I: IoControl<T>> bincode::Encode for EncodeHelper<'_, T, I> {
     }
 }
 
-impl<'a, T, I: IoControl<T>> EncodeHelper<'a, T, I> {
-    #[inline(always)]
-    const fn new(ioctl: &'a I) -> Self {
-        Self(ioctl, PhantomData)
-    }
-
+impl<'a, I: IoControl> EncodeHelper<'a, I> {
     #[inline(always)]
     const fn get(&self) -> &I {
         &self.0
@@ -463,14 +526,14 @@ impl<'a, T, I: IoControl<T>> EncodeHelper<'a, T, I> {
 }
 
 /// Helper struct for vhci ioctl objects.
-/// 
-/// Allows [`IoControl::Output`] to be 
+///
+/// Allows [`IoControl::Output`] to be
 /// decoded by bincode without needing the
 /// [`IoControl`] object to implement [`bincode::Decode`]
 /// itself.
-struct DecodeWrapper<T, I: IoControl<T>>(T, PhantomData<I>);
+struct DecodeWrapper<I: IoControl>(I::Output, PhantomData<I>);
 
-impl<T, I: IoControl<T>> bincode::Decode for DecodeWrapper<T, I> {
+impl<I: IoControl> bincode::Decode for DecodeWrapper<I> {
     fn decode<D: bincode::de::Decoder>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
@@ -479,19 +542,19 @@ impl<T, I: IoControl<T>> bincode::Decode for DecodeWrapper<T, I> {
     }
 }
 
-impl<T, I: IoControl<T>> DecodeWrapper<T, I> {
+impl<I: IoControl> DecodeWrapper<I> {
     #[inline(always)]
-    const fn new(item: T) -> Self {
+    const fn new(item: I::Output) -> Self {
         Self(item, PhantomData)
     }
 
     #[inline(always)]
-    fn into_inner(self) -> T {
+    fn into_inner(self) -> I::Output {
         self.0
     }
 }
 
-pub fn relay<T, I: IoControl<T>>(handle: BorrowedHandle, ioctl: I) -> Result<T, DoorError> {
+pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output, DoorError> {
     let config = crate::net::bincode_config().with_little_endian();
     let code = I::ctrl_code().into_u32();
     let mut door = Door::new(handle, code);
@@ -512,18 +575,18 @@ pub fn relay<T, I: IoControl<T>>(handle: BorrowedHandle, ioctl: I) -> Result<T, 
     //             let output = None;        let output = Vec::<u8>::new();
     //             No loop                   Do loop
 
-    let input = I::Input::is_zero_sized()
+    let input = I::Send::is_zero_sized()
         .not()
-        .then(|| bincode::encode_to_vec(EncodeHelper::new(&ioctl), config))
+        .then(|| bincode::encode_to_vec(EncodeHelper(&ioctl), config))
         .transpose()?;
     let input_ref = input.as_ref().map(|buf| buf.as_slice());
 
-    if !I::Output::is_zero_sized() {
+    if !I::Recv::is_zero_sized() {
         let mut output = Vec::<u8>::new();
         let mut start = 0;
         for num_ioctl_devs in BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 2) {
             output.resize(
-                I::Output::ENCODED_SIZE_OF
+                I::Recv::ENCODED_SIZE_OF
                     .checked_mul(num_ioctl_devs)
                     .unwrap()
                     .checked_add(core::mem::size_of::<u32>())
@@ -548,10 +611,10 @@ pub fn relay<T, I: IoControl<T>>(handle: BorrowedHandle, ioctl: I) -> Result<T, 
         }
 
         let num_items =
-            ((output.len() - core::mem::size_of::<u32>()) / I::Output::ENCODED_SIZE_OF) as u32;
+            ((output.len() - core::mem::size_of::<u32>()) / I::Recv::ENCODED_SIZE_OF) as u32;
         output[0..core::mem::size_of::<u32>()].copy_from_slice(&num_items.to_le_bytes());
 
-        let output = bincode::decode_from_slice::<DecodeWrapper<T, I>, _>(
+        let output = bincode::decode_from_slice::<DecodeWrapper<I>, _>(
             &output,
             crate::net::bincode_config().with_little_endian(),
         )?
@@ -561,7 +624,7 @@ pub fn relay<T, I: IoControl<T>>(handle: BorrowedHandle, ioctl: I) -> Result<T, 
     } else {
         door.read_write(input_ref, None)?;
 
-        let output = bincode::decode_from_slice::<DecodeWrapper<T, I>, _>(&[], config)?.0;
+        let output = bincode::decode_from_slice::<DecodeWrapper<I>, _>(&[], config)?.0;
         Ok(output.into_inner())
     }
 }

@@ -16,6 +16,7 @@ use std::{ffi::c_char, str::FromStr};
 pub unsafe trait EncodedSize {
     const ENCODED_SIZE_OF: usize;
 
+    #[inline]
     fn is_zero_sized() -> bool {
         <Self as EncodedSize>::ENCODED_SIZE_OF == 0
     }
