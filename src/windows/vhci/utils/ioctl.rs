@@ -52,8 +52,10 @@ use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::ops::Not;
-use std::os::windows::ffi::OsStrExt;
+use std::os;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
+use std::str::FromStr;
 
 use bincode::de::read::Reader as _;
 use bincode::de::read::{BorrowReader, Reader};
@@ -100,14 +102,20 @@ where
 {
     /// The object that will be sent to [`DeviceIoControl`].
     type Send;
+
     /// The object that [`DeviceIoControl`] will return.
     type Recv;
 
+    /// The object that [`relay`] will return on success.
+    /// 
+    /// Consumers of this trait should base this object
+    /// off the results of [`IoControl::Recv`].
     type Output;
 
     /// The requested ioctl function for the vhci driver.
     const FUNCTION: Function;
 
+    #[inline(always)]
     fn ctrl_code() -> ControlCode {
         ControlCode(
             DeviceType::Unknown,
@@ -122,8 +130,9 @@ where
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError>;
 
-    fn recv<D: bincode::de::Decoder>(
+    fn recv<'a, D: bincode::de::BorrowDecoder<'a>>(
         decoder: &mut D,
+        buf_len: usize,
     ) -> Result<Self::Output, bincode::error::DecodeError>;
 }
 
@@ -207,8 +216,9 @@ impl IoControl for Detach {
         self.port.encode(encoder)
     }
 
-    fn recv<D: bincode::de::Decoder>(
+    fn recv<'a, D: bincode::de::BorrowDecoder<'a>>(
         _: &mut D,
+        _: usize,
     ) -> Result<Self::Output, bincode::error::DecodeError> {
         Ok(())
     }
@@ -272,8 +282,9 @@ impl<'a> IoControl for Attach<'a> {
         Ok(())
     }
 
-    fn recv<D: bincode::de::Decoder>(
+    fn recv<'b, D: bincode::de::BorrowDecoder<'b>>(
         decoder: &mut D,
+        _buf_len: usize,
     ) -> Result<Self::Output, bincode::error::DecodeError> {
         decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
         decoder.reader().consume(core::mem::size_of::<u32>());
@@ -349,18 +360,15 @@ impl IoControl for GetImportedDevices {
     type Output = Vec<Self::Recv>;
     const FUNCTION: Function = Function::GetImportedDevices;
 
-    fn recv<D: bincode::de::Decoder>(
+    fn recv<'a, D: bincode::de::BorrowDecoder<'a>>(
         decoder: &mut D,
+        buf_len: usize,
     ) -> Result<Self::Output, bincode::error::DecodeError> {
-        // DeviceIoControl writes the a u32 value to the output
-        // buffer before writing any actual data. This u32 value
-        // is the total size of the output data, aka "bytes written".
-        //
-        // Therefore, we can subtract sizeof::<u32>() from the value
-        // and divide by the size of a single Self::Recv object, which
-        // should give us the number of objects in this buffer.
-        let len = (u32::decode(decoder)? as usize - core::mem::size_of::<u32>())
-            / Self::Recv::ENCODED_SIZE_OF;
+        decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
+        decoder.reader().consume(core::mem::size_of::<u32>());
+
+        let len = (buf_len - core::mem::size_of::<u32>()) / Self::Recv::ENCODED_SIZE_OF;
+
         let mut buf = Vec::with_capacity(len);
 
         decoder.claim_container_read::<[u8; Self::Recv::ENCODED_SIZE_OF]>(len)?;
@@ -450,26 +458,23 @@ impl bincode::Decode for ImportedDevice {
 impl_borrow_decode!(ImportedDevice);
 
 pub struct OwnedDeviceLocation {
-    host: SocketAddr,
-    bus_id: StackStr<BUS_ID_SIZE>,
+    pub host: SocketAddr,
+    pub bus_id: StackStr<BUS_ID_SIZE>,
+}
+
+impl FromStr for OwnedDeviceLocation {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        todo!()
+    }
 }
 
 #[derive(bincode::Decode, bincode::Encode)]
-#[repr(C)]
 pub struct WideChar(u16);
 
 unsafe impl EncodedSize for WideChar {
     const ENCODED_SIZE_OF: usize = core::mem::size_of::<u16>();
-}
-
-struct WideStr(OsString);
-
-impl bincode::Decode for WideStr {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        todo!()
-    }
 }
 
 pub struct GetPersistentDevices;
@@ -484,12 +489,26 @@ impl IoControl for GetPersistentDevices {
         Ok(())
     }
 
-    fn recv<D: bincode::de::Decoder>(
+    fn recv<'a, D: bincode::de::BorrowDecoder<'a>>(
         decoder: &mut D,
+        buf_len: usize,
     ) -> Result<Self::Output, bincode::error::DecodeError> {
-        let buf = WideStr::decode(decoder)?;
+        decoder.claim_bytes_read(buf_len)?;
+        let buf = decoder.borrow_reader().take_bytes(buf_len)?;
 
-        todo!()
+        // Now we're going to be silly.
+        // This will panic if not properly aligned, which will
+        // definitely mean that I did something wrong.
+        let phat_buf = crate::windows::vhci::utils::cast_u8_to_u16_slice(buf);
+
+        // If this fails this might also be my fault, not sure
+        Ok(String::from_utf16(phat_buf)
+            .map_err(|_| {
+                bincode::error::DecodeError::Other("Failed to decode UTF-16 slice as String")
+            })?
+            .split_terminator('\0')
+            .filter_map(|s| s.parse::<OwnedDeviceLocation>().ok())
+            .collect::<Self::Output>())
     }
 }
 
@@ -548,35 +567,6 @@ impl<'a, I: IoControl> EncodeHelper<'a, I> {
     }
 }
 
-/// Helper struct for vhci ioctl objects.
-///
-/// Allows [`IoControl::Output`] to be
-/// decoded by bincode without needing the
-/// [`IoControl`] object to implement [`bincode::Decode`]
-/// itself.
-struct DecodeWrapper<I: IoControl>(I::Output, PhantomData<I>);
-
-impl<I: IoControl> bincode::Decode for DecodeWrapper<I> {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let out = I::recv(decoder)?;
-        Ok(Self::new(out))
-    }
-}
-
-impl<I: IoControl> DecodeWrapper<I> {
-    #[inline(always)]
-    const fn new(item: I::Output) -> Self {
-        Self(item, PhantomData)
-    }
-
-    #[inline(always)]
-    fn into_inner(self) -> I::Output {
-        self.0
-    }
-}
-
 pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output, DoorError> {
     let config = crate::net::bincode_config().with_little_endian();
     let code = I::ctrl_code().into_u32();
@@ -619,12 +609,12 @@ pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output
 
             match door.read_write(input_ref, Some(&mut output[start..])) {
                 Ok(0) => {
-                    // Door's read_write implementation requires that we 
+                    // Door's read_write implementation requires that we
                     // call until we get Ok(0), which is at least two
                     // times due to Door setting it's completion flag after
                     // a call to DeviceIoControl.
                     //
-                    // Before we leave this loop, we have to first make 
+                    // Before we leave this loop, we have to first make
                     // a trip to Ok(bytes_read) and correct the value of
                     // start no matter what. Therefore, this operation
                     // here will give us the correct length.
@@ -642,18 +632,22 @@ pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output
             }
         }
 
-        let output = bincode::decode_from_slice::<DecodeWrapper<I>, _>(
-            &output,
-            crate::net::bincode_config().with_little_endian(),
-        )?
-        .0;
+        let reader = bincode::de::read::SliceReader::new(&output);
+        let mut decoder = bincode::de::DecoderImpl::new(reader, config);
+        let recv = I::recv(&mut decoder, output.len())?;
 
-        Ok(output.into_inner())
+        Ok(recv)
     } else {
         door.read_write(input_ref, None)?;
 
-        let output = bincode::decode_from_slice::<DecodeWrapper<I>, _>(&[], config)?.0;
-        Ok(output.into_inner())
+        let reader = bincode::de::read::SliceReader::new(&[]);
+        let mut decoder = bincode::de::DecoderImpl::new(reader, config);
+
+        // This is a curtesy call, bc most implementations won't do anything
+        // in this function anyway, but it let's us construct the return type.
+        let recv = I::recv(&mut decoder, 0)?;
+
+        Ok(recv)
     }
 }
 

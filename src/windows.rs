@@ -25,8 +25,10 @@ pub mod vhci {
     };
 
     use crate::{
+        containers::stacktools::StackStr,
         vhci::{base, error2::Error},
         windows::vhci::utils::ioctl,
+        BUS_ID_SIZE,
     };
 
     use super::Win32Error;
@@ -49,10 +51,23 @@ pub mod vhci {
         pub bus_id: &'a str,
     }
 
+    pub struct DeviceLocation {
+        host: SocketAddr,
+        bus_id: StackStr<BUS_ID_SIZE>,
+    }
+
+    impl From<ioctl::OwnedDeviceLocation> for DeviceLocation {
+        fn from(value: ioctl::OwnedDeviceLocation) -> Self {
+            Self {
+                host: value.host,
+                bus_id: value.bus_id,
+            }
+        }
+    }
+
     #[derive(Debug)]
     pub struct PortRecord {
         base: base::PortRecord,
-        port: u16,
     }
 
     impl From<ioctl::PortRecord> for PortRecord {
@@ -62,8 +77,8 @@ pub mod vhci {
                 base: base::PortRecord {
                     host: host.to_socket_addrs().unwrap().next().unwrap(),
                     busid: value.busid,
+                    port: value.port as u16,
                 },
-                port: value.port as u16,
             }
         }
     }
@@ -93,22 +108,8 @@ pub mod vhci {
     pub struct WindowsImportedDevices(Box<[WindowsImportedDevice]>);
 
     impl WindowsImportedDevices {
-        pub fn iter(&self) -> core::slice::Iter<'_, WindowsImportedDevice> {
-            self.get().iter()
-        }
-
         pub fn get(&self) -> &[WindowsImportedDevice] {
             &self.0
-        }
-    }
-
-    impl FromIterator<ioctl::ImportedDevice> for WindowsImportedDevices {
-        fn from_iter<T: IntoIterator<Item = ioctl::ImportedDevice>>(iter: T) -> Self {
-            let vec: Vec<_> = iter
-                .into_iter()
-                .map(|idev| WindowsImportedDevice::from(idev))
-                .collect();
-            WindowsImportedDevices(vec.into_boxed_slice())
         }
     }
 
@@ -161,12 +162,26 @@ pub mod vhci {
             let idevs = ioctl::relay(self.as_handle(), ioctl::GetImportedDevices)
                 .map_err(|err| match err {
                     DoorError::Io(io) => Error::WriteSys(io),
+                    err => Err(err).unwrap(),
+                })?
+                .into_iter()
+                .map(From::from)
+                .collect::<Vec<_>>();
+
+            Ok(WindowsImportedDevices(idevs.into_boxed_slice()))
+        }
+
+        fn persistent_devices(&self) -> crate::vhci::Result<Vec<DeviceLocation>> {
+            let dev_locs = ioctl::relay(self.as_handle(), ioctl::GetPersistentDevices)
+                .map_err(|err| match err {
+                    DoorError::Io(io) => Error::WriteSys(io),
                     _ => unreachable!("Developer error in parsing data"),
                 })?
                 .into_iter()
+                .map(From::from)
                 .collect();
 
-            Ok(idevs)
+            Ok(dev_locs)
         }
 
         fn path() -> crate::vhci::Result<PathBuf> {

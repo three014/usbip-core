@@ -81,6 +81,7 @@ pub mod base {
 
     #[derive(Debug)]
     pub struct PortRecord {
+        pub(crate) port: u16,
         pub(crate) host: SocketAddr,
         pub(crate) busid: StackStr<BUS_ID_SIZE>,
     }
@@ -92,6 +93,10 @@ pub mod base {
 
         pub fn bus_id(&self) -> &str {
             &self.busid
+        }
+
+        pub const fn port(&self) -> u16 {
+            self.port
         }
     }
 }
