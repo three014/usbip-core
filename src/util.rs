@@ -6,9 +6,9 @@ use std::{ffi::c_char, str::FromStr};
 
 /// Describes the encoded size of the object
 /// when written to/read from a [`bincode`] buffer.
-/// 
+///
 /// # Safety
-/// 
+///
 /// Consumers of this trait must correctly report
 /// the size of the object when encoded into/decoded
 /// from [`bincode`]. Furthermore, the object's
@@ -19,7 +19,9 @@ pub unsafe trait EncodedSize {
 }
 
 #[allow(dead_code)]
-pub fn parse_token<'a, 'b: 'a, T>(tokens: &'a mut impl Iterator<Item = &'b str>) -> Result<T, T::Err>
+pub fn parse_token<'a, 'b: 'a, T>(
+    tokens: &'a mut impl Iterator<Item = &'b str>,
+) -> Result<T, T::Err>
 where
     T: FromStr,
     T::Err: std::error::Error,

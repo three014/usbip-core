@@ -1,5 +1,6 @@
 use std::{
     borrow::{Borrow, Cow},
+    fmt::Display,
     ops::Deref,
 };
 
@@ -10,6 +11,16 @@ where
     Borrowed(&'a B),
     Owned(<B as ToOwned>::Owned),
     Static(&'static B),
+}
+
+impl<'a, B: std::fmt::Debug> core::fmt::Debug for Beef<'a, B>
+where
+    B: 'static + ?Sized + ToOwned,
+    <B as ToOwned>::Owned: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.deref().fmt(f)
+    }
 }
 
 impl<'a, B> From<Beef<'a, B>> for Cow<'static, B>
@@ -38,3 +49,15 @@ where
         }
     }
 }
+
+impl<'a, B> Display for Beef<'a, B>
+where
+    B: ?Sized + ToOwned + Display + 'static,
+    <B as ToOwned>::Owned: Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.deref().fmt(f)
+    }
+}
+
+

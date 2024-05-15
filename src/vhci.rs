@@ -1,6 +1,7 @@
 //! Ahh, the silly vhci module. This is where everything begins.
 
 pub mod error2 {
+    use crate::{containers::beef::Beef, USBIP_VERSION};
 
     /// The error type for VHCI operations.
     #[derive(Debug)]
@@ -9,6 +10,7 @@ pub mod error2 {
         PortNotInUse,
         DriverNotFound,
         WriteSys(std::io::Error),
+        Net(crate::net::Error),
         #[cfg(windows)]
         MultipleDevInterfaces(usize),
     }
@@ -26,6 +28,7 @@ pub mod error2 {
                 Error::PortNotInUse => write!(f, "Port not in use"),
                 Error::DriverNotFound => write!(f, "VHCI device not found, is the driver loaded?"),
                 Error::WriteSys(io) => write!(f, "Driver I/O error: {io}"),
+                Error::Net(net) => write!(f, "Net error: {net}"),
                 #[cfg(windows)]
                 Error::MultipleDevInterfaces(num) => write!(
                     f,
@@ -77,11 +80,18 @@ pub mod base {
         pub const fn product(&self) -> u16 {
             self.product
         }
+
+        pub const fn bus_num(&self) -> u32 {
+            self.dev_id() >> 16
+        }
+
+        pub const fn dev_num(&self) -> u32 {
+            self.dev_id() & 0x0000ffff
+        }
     }
 
     #[derive(Debug)]
     pub struct PortRecord {
-        pub(crate) port: u16,
         pub(crate) host: SocketAddr,
         pub(crate) busid: StackStr<BUS_ID_SIZE>,
     }
@@ -93,10 +103,6 @@ pub mod base {
 
         pub fn bus_id(&self) -> &str {
             &self.busid
-        }
-
-        pub const fn port(&self) -> u16 {
-            self.port
         }
     }
 }

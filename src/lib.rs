@@ -42,11 +42,99 @@ pub mod containers {
 mod util;
 pub mod net {
     use core::fmt;
+    use std::net::TcpStream;
 
-    use bincode::config::{BigEndian, Configuration, Fixint};
+    use bincode::{
+        config::{BigEndian, Configuration, Fixint},
+        error::AllowedEnumVariants,
+        impl_borrow_decode,
+    };
+
+    use crate::{
+        containers::{beef::Beef, stacktools::StackStr},
+        util::__private::Sealed,
+        UsbDevice, BUS_ID_SIZE, USBIP_VERSION,
+    };
+
+    use bitflags::bitflags;
+
+    bitflags! {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct Protocol: u16 {
+            // Common header for all the kinds of PDUs.
+            const OP_REQUEST = 0x80 << 8;
+            const OP_REPLY = 0x00 << 8;
+
+            // Import a remote USB device.
+            const OP_IMPORT = 0x03;
+            const OP_REQ_IMPORT = Self::OP_REQUEST.bits() | Self::OP_IMPORT.bits();
+            const OP_REP_IMPORT = Self::OP_REPLY.bits() | Self::OP_IMPORT.bits();
+
+            // Dummy code
+            const OP_UNSPEC = 0x00;
+            const _OP_REQ_UNSPEC = Self::OP_UNSPEC.bits();
+            const _OP_REP_UNSPEC = Self::OP_UNSPEC.bits();
+
+            // Retrieve the list of exported USB devices
+            const OP_DEVLIST = 0x05;
+            const OP_REQ_DEVLIST = Self::OP_REQUEST.bits() | Self::OP_DEVLIST.bits();
+            const OP_REP_DEVLIST = Self::OP_REPLY.bits() | Self::OP_DEVLIST.bits();
+
+            // Export a USB device to a remote host
+            const OP_EXPORT = 0x06;
+            const OP_REQ_EXPORT = Self::OP_REQUEST.bits() | Self::OP_EXPORT.bits();
+            const OP_REP_EXPORT = Self::OP_REPLY.bits() | Self::OP_EXPORT.bits();
+        }
+    }
+
+    impl bincode::Encode for Protocol {
+        fn encode<E: bincode::enc::Encoder>(
+            &self,
+            encoder: &mut E,
+        ) -> Result<(), bincode::error::EncodeError> {
+            self.bits().encode(encoder)
+        }
+    }
+
+    impl bincode::Decode for Protocol {
+        fn decode<D: bincode::de::Decoder>(
+            decoder: &mut D,
+        ) -> Result<Self, bincode::error::DecodeError> {
+            static PROTO_SIMPLE_FLAGS: &'static [u32] = &[
+                Protocol::OP_REQUEST.bits() as u32,
+                Protocol::OP_REPLY.bits() as u32,
+                Protocol::OP_IMPORT.bits() as u32,
+                Protocol::OP_REQ_IMPORT.bits() as u32,
+                Protocol::OP_REP_IMPORT.bits() as u32,
+                Protocol::OP_UNSPEC.bits() as u32,
+                Protocol::_OP_REQ_UNSPEC.bits() as u32,
+                Protocol::_OP_REP_UNSPEC.bits() as u32,
+                Protocol::OP_DEVLIST.bits() as u32,
+                Protocol::OP_REQ_DEVLIST.bits() as u32,
+                Protocol::OP_REP_DEVLIST.bits() as u32,
+                Protocol::OP_EXPORT.bits() as u32,
+                Protocol::OP_REQ_EXPORT.bits() as u32,
+                Protocol::OP_REP_EXPORT.bits() as u32,
+            ];
+
+            static BINCODE_PROTO_ALLOWED_FLAGS: AllowedEnumVariants =
+                AllowedEnumVariants::Allowed(PROTO_SIMPLE_FLAGS);
+
+            let code = u16::decode(decoder)?;
+
+            Self::from_bits(code).ok_or(bincode::error::DecodeError::UnexpectedVariant {
+                type_name: "Protocol",
+                allowed: &BINCODE_PROTO_ALLOWED_FLAGS,
+                found: code as u32,
+            })
+        }
+    }
+
+    impl_borrow_decode!(Protocol);
 
     /// The result of a USB/IP network request.
-    #[derive(Debug, Clone, Copy, bincode::Encode, bincode::Decode)]
+    /// Will encode/decode as a 4 byte value.
+    #[derive(Debug, Clone, Copy, bincode::Encode, bincode::Decode, PartialEq, Eq)]
     pub enum Status {
         Success = 0x00,
         Failed = 0x01,
@@ -80,6 +168,136 @@ pub mod net {
             .with_no_limit()
             .with_big_endian()
             .with_fixed_int_encoding()
+    }
+
+    pub trait Send: std::io::Write + Sealed {
+        fn send<T: bincode::Encode>(&mut self, data: &T) -> Result<usize, Error>;
+    }
+
+    pub trait Recv: std::io::Read + Sealed {
+        fn recv<T: bincode::Decode>(&mut self) -> Result<T, Error>;
+    }
+
+    impl From<bincode::error::DecodeError> for Error {
+        fn from(value: bincode::error::DecodeError) -> Self {
+            Self::De(value)
+        }
+    }
+
+    impl From<bincode::error::EncodeError> for Error {
+        fn from(value: bincode::error::EncodeError) -> Self {
+            Self::Enc(value)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Error {
+        VersionMismatch(u16),
+        BusIdMismatch(Beef<'static, str>),
+        Enc(bincode::error::EncodeError),
+        De(bincode::error::DecodeError),
+    }
+
+    impl core::fmt::Display for Error {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Error::VersionMismatch(bad_version) => write!(
+                    f,
+                    "Version mismatch! Them: {}, Us: {}",
+                    bad_version, USBIP_VERSION
+                ),
+                Error::BusIdMismatch(bus_id) => write!(f, "Received different busid \"{bus_id}\""),
+                Error::Enc(enc) => write!(f, "Encode error! {enc}"),
+                Error::De(de) => write!(f, "Decode error! {de}"),
+            }
+        }
+    }
+
+    impl std::error::Error for Error {}
+
+    impl From<Error> for crate::vhci::error2::Error {
+        fn from(value: Error) -> Self {
+            Self::Net(value)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, bincode::Encode, bincode::Decode)]
+    pub struct OpCommon {
+        version: u16,
+        code: Protocol,
+        status: Status,
+    }
+
+    impl OpCommon {
+        pub const fn req(code: Protocol) -> Self {
+            Self {
+                version: super::USBIP_VERSION as u16,
+                code,
+                status: Status::Success,
+            }
+        }
+
+        pub fn validate(&self, code: Protocol) -> Result<Status, Error> {
+            if self.version as usize != USBIP_VERSION {
+                Err(Error::VersionMismatch(self.version))
+            } else if code != Protocol::OP_UNSPEC && code != self.code {
+                Ok(Status::Unexpected)
+            } else {
+                Ok(self.status)
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct OpImportRequest<'a> {
+        bus_id: &'a str,
+    }
+
+    impl bincode::Encode for OpImportRequest<'_> {
+        fn encode<E: bincode::enc::Encoder>(
+            &self,
+            encoder: &mut E,
+        ) -> Result<(), bincode::error::EncodeError> {
+            let s = StackStr::<BUS_ID_SIZE>::try_from(self.bus_id)
+                .map_err(|_| bincode::error::EncodeError::UnexpectedEnd)?;
+
+            s.encode(encoder)
+        }
+    }
+
+    impl<'a> OpImportRequest<'a> {
+        pub const fn new(bus_id: &'a str) -> Self {
+            Self { bus_id }
+        }
+    }
+
+    #[derive(Debug, bincode::Encode, bincode::Decode)]
+    pub struct OpImportReply {
+        usb_dev: UsbDevice,
+    }
+
+    impl OpImportReply {
+        pub const fn new(usb_dev: UsbDevice) -> Self {
+            Self { usb_dev }
+        }
+
+        pub const fn into_inner(self) -> UsbDevice {
+            self.usb_dev
+        }
+    }
+
+    #[derive(Debug, bincode::Encode, bincode::Decode)]
+    pub struct OpDevlistReply {
+        num_devices: u32,
+    }
+
+    impl OpDevlistReply {
+        pub const fn new(num_devices: u32) -> Self {
+            Self { num_devices }
+        }
+
+        pub const fn num_devices(&self) -> u32 {
+            self.num_devices
+        }
     }
 }
 

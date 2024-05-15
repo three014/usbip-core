@@ -37,15 +37,13 @@ use crate::{
         beef::Beef,
         stacktools::{self, StackStr},
     },
+    net::{self, OpCommon, OpImportReply, OpImportRequest, Protocol, Recv, Send, Status},
     util::parse_token,
     vhci::{base, error2::Error, HubSpeed},
-    DeviceSpeed, DeviceStatus,
+    DeviceSpeed, DeviceStatus, unix::net::UsbipStream,
 };
 
-use super::{
-    udev_helpers::UdevHelper,
-    UdevError,
-};
+use super::{udev_helpers::UdevHelper, UdevError};
 
 pub static STATE_PATH: &str = "/var/run/vhci_hcd";
 static BUS_TYPE: &str = "platform";
@@ -221,9 +219,9 @@ pub struct UnixImportedDevices(Box<[UnixImportedDevice]>);
 pub struct UnixImportedDevice {
     base: base::ImportedDevice,
     port: u16,
-    usb_dev: crate::UsbDevice,
     hub: HubSpeed,
     status: crate::DeviceStatus,
+    usb_dev: crate::UsbDevice,
 }
 
 impl UnixImportedDevice {
@@ -262,7 +260,7 @@ struct UnixIdevDisplay<'a, 'b> {
 
 impl fmt::Display for UnixIdevDisplay<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let idev = &self.idev;
+        let idev = self.idev;
         let usb_dev = &self.idev.usb_dev;
         if idev.status() == DeviceStatus::PortInitializing
             || idev.status() == DeviceStatus::PortAvailable
@@ -418,16 +416,6 @@ impl TryFrom<InitData<'_>> for UnixImportedDevices {
     }
 }
 
-impl crate::UsbDevice {
-    pub fn attach_args(&self, socket: TcpStream) -> AttachArgs {
-        AttachArgs {
-            socket,
-            dev_id: self.dev_id(),
-            device_speed: self.speed(),
-        }
-    }
-}
-
 pub struct UnixVhciDriver {
     inner: InnerDriver,
 }
@@ -442,7 +430,7 @@ struct InnerDriver {
 impl InnerDriver {
     fn try_open() -> crate::vhci::Result<Self> {
         let hc_device = udev::Device::from_subsystem_sysname(BUS_TYPE.into(), DEVICE_NAME.into())
-            .map_err(|_| Error::DriverNotLoaded)?;
+            .map_err(|_| Error::DriverNotFound)?;
         let num_ports: NonZeroUsize = hc_device
             .parse_sysattr(Beef::Static("nports"))
             .expect("udev should have this attribute");
@@ -487,15 +475,36 @@ impl InnerDriver {
     }
 
     fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
-        let AttachArgs {
-            socket,
-            dev_id,
-            device_speed,
-        } = args;
+        let AttachArgs { host, bus_id } = args;
+
+        let mut socket = UsbipStream::connect(&host)?;
+
+        // Query host for usb info
+        let req = OpCommon::req(Protocol::OP_REQ_IMPORT);
+        socket.send(&req)?;
+
+        let req = OpImportRequest::new(bus_id);
+        socket.send(&req)?;
+
+        let rep: OpCommon = socket.recv()?;
+        assert_ne!(rep.validate(Protocol::OP_REP_IMPORT)?, Status::Unexpected);
+
+        let rep: OpImportReply = socket.recv()?;
+        let usb_dev = rep.into_inner();
+
+        if usb_dev.bus_id() != bus_id {
+            return Err(crate::net::Error::BusIdMismatch(Beef::Owned(
+                usb_dev.bus_id().to_string(),
+            ))
+            .into());
+        }
+
+        let speed = usb_dev.speed();
+        let dev_id = usb_dev.dev_id();
 
         let port = self
             .open_ports
-            .get_next(device_speed)
+            .get_next(speed)
             .ok_or(Error::NoFreePorts)?;
 
         let path = self.udev().syspath();
@@ -511,21 +520,36 @@ impl InnerDriver {
             port.port,
             socket.as_raw_fd(),
             dev_id,
-            device_speed as u32
+            speed as u32
         ))
         .unwrap();
 
         file.write_all(buf.as_bytes())
             .inspect_err(|_| self.open_ports.push(port))?;
 
+        // Record connection
+
         Ok(port.port)
+    }
+
+    fn record_connection(&self, port: u16, host: &TcpStream, bus_id: &str) -> std::io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+
+        if let Err(err) = std::fs::DirBuilder::new().mode(0o700).create(STATE_PATH) {
+            if !(err.kind() == std::io::ErrorKind::AlreadyExists
+                && std::fs::metadata(STATE_PATH).is_ok_and(|s| s.is_dir()))
+            {
+                eprintln!("Failed to record connection");
+            }
+        }
+
+        todo!()
     }
 }
 
-pub struct AttachArgs {
-    pub socket: TcpStream,
-    pub dev_id: u32,
-    pub device_speed: DeviceSpeed,
+pub struct AttachArgs<'a> {
+    pub host: SocketAddr,
+    pub bus_id: &'a str,
 }
 
 impl UnixVhciDriver {
@@ -552,7 +576,7 @@ impl UnixVhciDriver {
 }
 
 fn num_controllers(hc_device: &udev::Device) -> crate::vhci::Result<NonZeroUsize> {
-    let platform = hc_device.parent().ok_or(Error::DriverNotLoaded)?;
+    let platform = hc_device.parent().ok_or(Error::DriverNotFound)?;
     let count: NonZeroUsize = platform
         .syspath()
         .read_dir()?

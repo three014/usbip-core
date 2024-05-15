@@ -1,5 +1,110 @@
 mod udev_helpers;
 pub mod vhci2;
+mod net {
+    use std::{
+        ffi::c_int,
+        net::{SocketAddr, TcpStream},
+        os::fd::AsRawFd,
+    };
+
+    use libc::{c_void, socklen_t};
+
+    use crate::{
+        net::{bincode_config, Error, Recv},
+        util::__private::Sealed,
+    };
+
+    pub struct UsbipStream(TcpStream);
+
+    impl UsbipStream {
+        #[inline(always)]
+        const fn new(inner: TcpStream) -> Self {
+            Self(inner)
+        }
+
+        #[inline(always)]
+        const fn get(&self) -> &TcpStream {
+            &self.0
+        }
+
+        #[inline(always)]
+        fn get_mut(&mut self) -> &mut TcpStream {
+            &mut self.0
+        }
+
+        pub fn connect(host: &SocketAddr) -> std::io::Result<Self> {
+            let socket = TcpStream::connect(host)?;
+            socket.set_nodelay(true)?;
+            socket.set_keepalive(true)?;
+            Ok(Self::new(socket))
+        }
+    }
+
+    impl std::io::Read for UsbipStream {
+        #[inline(always)]
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.get_mut().read(buf)
+        }
+    }
+
+    impl std::io::Write for UsbipStream {
+        #[inline(always)]
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.get_mut().write(buf)
+        }
+
+        #[inline(always)]
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.get_mut().flush()
+        }
+    }
+
+    impl crate::net::Send for UsbipStream {
+        fn send<T: bincode::Encode>(&mut self, data: &T) -> Result<usize, Error> {
+            bincode::encode_into_std_write(data, self, bincode_config()).map_err(Error::Enc)
+        }
+    }
+
+    impl Recv for UsbipStream {
+        fn recv<T: bincode::Decode>(&mut self) -> Result<T, Error> {
+            bincode::decode_from_std_read(self, bincode_config()).map_err(Error::De)
+        }
+    }
+
+    pub trait TcpStreamExt: Sealed {
+        fn set_keepalive(&self, keepalive: bool) -> std::io::Result<()>;
+    }
+
+    impl Sealed for TcpStream {}
+    impl Sealed for UsbipStream {}
+
+    impl TcpStreamExt for TcpStream {
+        fn set_keepalive(&self, keepalive: bool) -> std::io::Result<()> {
+            let val = c_int::from(keepalive);
+            let rc = unsafe {
+                libc::setsockopt(
+                    self.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_KEEPALIVE,
+                    core::ptr::addr_of!(val).cast::<c_void>(),
+                    socklen_t::try_from(core::mem::size_of::<c_int>()).unwrap(),
+                )
+            };
+            if rc < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl AsRawFd for UsbipStream {
+        #[inline(always)]
+        fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+            self.get().as_raw_fd()
+        }
+    }
+}
 
 use crate::{
     containers::{
@@ -9,12 +114,7 @@ use crate::{
     unix::udev_helpers::UdevHelper,
     BUS_ID_SIZE, DEV_PATH_MAX,
 };
-use std::{
-    borrow::Cow,
-    ffi::OsStr,
-    os::unix::ffi::OsStrExt,
-    path::Path,
-};
+use std::{borrow::Cow, ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
 use udev;
 pub use udev_helpers::Error as UdevError;
 
