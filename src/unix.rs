@@ -38,6 +38,10 @@ mod net {
             socket.set_keepalive(true)?;
             Ok(Self::new(socket))
         }
+
+        pub fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+            self.get().peer_addr()
+        }
     }
 
     impl std::io::Read for UsbipStream {

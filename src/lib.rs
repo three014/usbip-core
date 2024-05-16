@@ -41,8 +41,12 @@ pub mod containers {
 }
 mod util;
 pub mod net {
+    //! Contains the implementation of the USB/IP [protocol]
+    //! as defined by the linux kernel.
+    //!
+    //! [protocol]: https://www.kernel.org/doc/html/latest/usb/usbip_protocol.html
     use core::fmt;
-    use std::net::TcpStream;
+    use std::borrow::Cow;
 
     use bincode::{
         config::{BigEndian, Configuration, Fixint},
@@ -51,7 +55,7 @@ pub mod net {
     };
 
     use crate::{
-        containers::{beef::Beef, stacktools::StackStr},
+        containers::stacktools::StackStr,
         util::__private::Sealed,
         UsbDevice, BUS_ID_SIZE, USBIP_VERSION,
     };
@@ -59,6 +63,7 @@ pub mod net {
     use bitflags::bitflags;
 
     bitflags! {
+        /// The USB/IP protocol.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct Protocol: u16 {
             // Common header for all the kinds of PDUs.
@@ -192,7 +197,7 @@ pub mod net {
     #[derive(Debug)]
     pub enum Error {
         VersionMismatch(u16),
-        BusIdMismatch(Beef<'static, str>),
+        BusIdMismatch(Cow<'static, str>),
         Enc(bincode::error::EncodeError),
         De(bincode::error::DecodeError),
     }
@@ -228,11 +233,18 @@ pub mod net {
     }
 
     impl OpCommon {
-        pub const fn req(code: Protocol) -> Self {
+        pub const fn request(code: Protocol) -> Self {
             Self {
                 version: super::USBIP_VERSION as u16,
                 code,
                 status: Status::Success,
+            }
+        }
+
+        pub const fn reply(self, status: Status) -> Self {
+            Self {
+                status,
+                ..self
             }
         }
 

@@ -24,11 +24,11 @@ use core::fmt::{self, Write};
 use std::{
     fs,
     io::{self, Write as IoWrite},
-    net::{AddrParseError, IpAddr, SocketAddr, TcpStream},
+    net::{AddrParseError, IpAddr, SocketAddr},
     num::{NonZeroUsize, ParseIntError},
     ops::Deref,
     os::fd::AsRawFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
 };
 
@@ -37,10 +37,11 @@ use crate::{
         beef::Beef,
         stacktools::{self, StackStr},
     },
-    net::{self, OpCommon, OpImportReply, OpImportRequest, Protocol, Recv, Send, Status},
+    net::{OpCommon, OpImportReply, OpImportRequest, Protocol, Recv, Send, Status},
+    unix::net::UsbipStream,
     util::parse_token,
-    vhci::{base, error2::Error, HubSpeed},
-    DeviceSpeed, DeviceStatus, unix::net::UsbipStream,
+    vhci::{base, error2::Error, AttachArgs, HubSpeed},
+    DeviceSpeed, DeviceStatus,
 };
 
 use super::{udev_helpers::UdevHelper, UdevError};
@@ -480,7 +481,7 @@ impl InnerDriver {
         let mut socket = UsbipStream::connect(&host)?;
 
         // Query host for usb info
-        let req = OpCommon::req(Protocol::OP_REQ_IMPORT);
+        let req = OpCommon::request(Protocol::OP_REQ_IMPORT);
         socket.send(&req)?;
 
         let req = OpImportRequest::new(bus_id);
@@ -493,19 +494,15 @@ impl InnerDriver {
         let usb_dev = rep.into_inner();
 
         if usb_dev.bus_id() != bus_id {
-            return Err(crate::net::Error::BusIdMismatch(Beef::Owned(
-                usb_dev.bus_id().to_string(),
-            ))
-            .into());
+            return Err(
+                crate::net::Error::BusIdMismatch(Beef::Borrowed(usb_dev.bus_id()).into()).into(),
+            );
         }
 
         let speed = usb_dev.speed();
         let dev_id = usb_dev.dev_id();
 
-        let port = self
-            .open_ports
-            .get_next(speed)
-            .ok_or(Error::NoFreePorts)?;
+        let port = self.open_ports.get_next(speed).ok_or(Error::NoFreePorts)?;
 
         let path = self.udev().syspath();
         let path = StackStr::<SYSFS_PATH_MAX>::try_from(format_args!("{:?}/attach", path)).unwrap();
@@ -528,28 +525,48 @@ impl InnerDriver {
             .inspect_err(|_| self.open_ports.push(port))?;
 
         // Record connection
+        if let Err(err) = self.record_connection(port.port, socket.peer_addr()?, bus_id) {
+            eprintln!("Failed to record new connection: {err}");
+        }
 
         Ok(port.port)
     }
 
-    fn record_connection(&self, port: u16, host: &TcpStream, bus_id: &str) -> std::io::Result<()> {
-        use std::os::unix::fs::DirBuilderExt;
+    fn record_connection(&self, port: u16, host: SocketAddr, bus_id: &str) -> std::io::Result<()> {
+        create_state_path()?;
 
-        if let Err(err) = std::fs::DirBuilder::new().mode(0o700).create(STATE_PATH) {
-            if !(err.kind() == std::io::ErrorKind::AlreadyExists
-                && std::fs::metadata(STATE_PATH).is_ok_and(|s| s.is_dir()))
-            {
-                eprintln!("Failed to record connection");
-            }
-        }
+        let path = StackStr::<256>::try_from(format_args!("{}/port{}", STATE_PATH, port)).unwrap();
+        let mut file = file_open(path.as_path())?;
+        writeln!(file, "{} {}", host, bus_id)?;
 
-        todo!()
+        Ok(())
     }
 }
 
-pub struct AttachArgs<'a> {
-    pub host: SocketAddr,
-    pub bus_id: &'a str,
+fn create_state_path() -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    if let Err(err) = std::fs::DirBuilder::new().mode(0o700).create(STATE_PATH) {
+        match err.kind() {
+            std::io::ErrorKind::AlreadyExists
+                if std::fs::metadata(STATE_PATH).is_ok_and(|s| s.is_dir()) => {}
+            _ => Err(err)?,
+        }
+    }
+
+    Ok(())
+}
+
+fn file_open<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .mode(0o700)
+        .open(path)
 }
 
 impl UnixVhciDriver {

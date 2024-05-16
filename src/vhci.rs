@@ -1,8 +1,6 @@
 //! Ahh, the silly vhci module. This is where everything begins.
 
 pub mod error2 {
-    use crate::{containers::beef::Beef, USBIP_VERSION};
-
     /// The error type for VHCI operations.
     #[derive(Debug)]
     pub enum Error {
@@ -45,7 +43,7 @@ pub(crate) mod error;
 mod platform {
     #[cfg(unix)]
     pub use crate::unix::vhci2::{
-        AttachArgs, PortRecord, UnixImportedDevice as ImportedDevice,
+        PortRecord, UnixImportedDevice as ImportedDevice,
         UnixImportedDevices as ImportedDevices, UnixVhciDriver as Driver, STATE_PATH,
     };
 
@@ -108,11 +106,17 @@ pub mod base {
 }
 
 use core::fmt;
-use std::str::FromStr;
+use std::{str::FromStr, net::SocketAddr};
 
-pub use platform::{AttachArgs, Driver, ImportedDevice, ImportedDevices, PortRecord, STATE_PATH};
+pub use platform::{Driver, ImportedDevice, ImportedDevices, PortRecord, STATE_PATH};
 
 pub type Result<T> = std::result::Result<T, error2::Error>;
+
+
+pub struct AttachArgs<'a> {
+    pub host: SocketAddr,
+    pub bus_id: &'a str,
+}
 
 /// The VHCI driver's supported USB device speeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
