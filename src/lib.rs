@@ -1,3 +1,14 @@
+//! # usbip-core
+//!
+//! A userspace library for interacting with the vhci kernel drivers.
+//!
+//! This is a rust port of two major libraries, [usbip-win2][https://github.com/vadimgrn/usbip-win2]
+//! (Windows) and [usbip-utils][https://github.com/torvalds/linux/tree/master/tools/usb/usbip] (Linux).
+//! 
+//! The goal of this library is to provide a platform-independent interface for sharing USB devices across
+//! the local internet. Currently only client-mode is supported, but future work will focus on supporting
+//! server-mode for at least Linux.
+
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -12,7 +23,7 @@ pub mod names;
 pub mod vhci;
 pub mod containers {
     pub mod beef;
-    pub mod singleton;
+    mod singleton;
     pub mod stacktools;
     pub mod iterators {
         use std::num::NonZeroU32;
@@ -175,10 +186,17 @@ pub mod net {
             .with_fixed_int_encoding()
     }
 
+    /// Convenience trait for encoding and 
+    /// writing the encoded data into a buffer
+    /// that implements the [`std::io::Write`]
+    /// trait.
     pub trait Send: std::io::Write + Sealed {
         fn send<T: bincode::Encode>(&mut self, data: &T) -> Result<usize, Error>;
     }
 
+    /// Convenience trait for reading data from
+    /// a buffer that implements [`std::io::Read`]
+    /// and decoding it into the type `T`.
     pub trait Recv: std::io::Read + Sealed {
         fn recv<T: bincode::Decode>(&mut self) -> Result<T, Error>;
     }
@@ -194,6 +212,10 @@ pub mod net {
             Self::Enc(value)
         }
     }
+
+    /// Represents all the possible userspace errors
+    /// that could occur with communicating between
+    /// a host and client.
     #[derive(Debug)]
     pub enum Error {
         VersionMismatch(u16),
@@ -233,6 +255,13 @@ pub mod net {
     }
 
     impl OpCommon {
+        /// Creates an [`OpCommon`] with
+        /// `code` as the request.
+        /// 
+        /// Depending on the [`Protocol`] used,
+        /// the remote device will expect
+        /// more data to be sent.
+        #[inline]
         pub const fn request(code: Protocol) -> Self {
             Self {
                 version: super::USBIP_VERSION as u16,
@@ -241,6 +270,10 @@ pub mod net {
             }
         }
 
+        /// Consumes an [`OpCommon`] and returns another
+        /// one with the `status` of whatever request
+        /// the remote device made.
+        #[inline]
         pub const fn reply(self, status: Status) -> Self {
             Self {
                 status,
@@ -248,10 +281,21 @@ pub mod net {
             }
         }
 
-        pub fn validate(&self, code: Protocol) -> Result<Status, Error> {
+        /// Performs basic validation on the [`OpCommon`] object.
+        ///
+        /// On success, returns the Status code of the [`OpCommon`].
+        ///
+        /// # Error
+        ///
+        /// This function will return an error if:
+        /// - the version number differs from the version number
+        ///   used in this userspace library
+        /// - the code inside the [`OpCommon`] object does not match
+        ///   `expected`
+        pub fn validate(&self, expected: Protocol) -> Result<Status, Error> {
             if self.version as usize != USBIP_VERSION {
                 Err(Error::VersionMismatch(self.version))
-            } else if code != Protocol::OP_UNSPEC && code != self.code {
+            } else if expected != Protocol::OP_UNSPEC && expected != self.code {
                 Ok(Status::Unexpected)
             } else {
                 Ok(self.status)
@@ -277,8 +321,27 @@ pub mod net {
     }
 
     impl<'a> OpImportRequest<'a> {
+        /// Constructs a new [`OpImportRequest`]
+        /// out of a [`str`] slice.
+        #[inline(always)]
         pub const fn new(bus_id: &'a str) -> Self {
             Self { bus_id }
+        }
+    }
+
+    /// The owned version of a [`OpImportRequest`].
+    /// Used for decoding from a buffer, since we
+    /// can't guarantee that the data in this struct
+    /// will last long enough for usage.
+    #[derive(Debug, bincode::Decode)]
+    pub struct OwnedOpImportRequest {
+        bus_id: StackStr<BUS_ID_SIZE>,
+    }
+
+    impl OwnedOpImportRequest {
+        #[inline(always)]
+        pub const fn into_inner(self) -> StackStr<BUS_ID_SIZE> {
+            self.bus_id
         }
     }
 
@@ -288,10 +351,12 @@ pub mod net {
     }
 
     impl OpImportReply {
+        #[inline(always)]
         pub const fn new(usb_dev: UsbDevice) -> Self {
             Self { usb_dev }
         }
 
+        #[inline(always)]
         pub const fn into_inner(self) -> UsbDevice {
             self.usb_dev
         }
@@ -303,10 +368,12 @@ pub mod net {
     }
 
     impl OpDevlistReply {
+        #[inline(always)]
         pub const fn new(num_devices: u32) -> Self {
             Self { num_devices }
         }
 
+        #[inline(always)]
         pub const fn num_devices(&self) -> u32 {
             self.num_devices
         }

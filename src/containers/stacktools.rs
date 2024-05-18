@@ -215,7 +215,7 @@ impl<const N: usize> bincode::Encode for StackStr<N> {
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
-        bincode::Encode::encode(&self.buf, encoder)
+        self.buf.encode(encoder)
     }
 }
 
@@ -236,6 +236,10 @@ impl fmt::Display for TryFromStrErr {
             TryFromStrErr::NotUtf8(err) => write!(f, "{err}"),
         }
     }
+}
+
+unsafe impl<const N: usize> crate::util::EncodedSize for StackStr<N> {
+    const ENCODED_SIZE_OF: usize = N;
 }
 
 #[cfg(test)]

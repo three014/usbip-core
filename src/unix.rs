@@ -4,7 +4,7 @@ mod net {
     use std::{
         ffi::c_int,
         net::{SocketAddr, TcpStream},
-        os::fd::AsRawFd,
+        os::fd::{AsRawFd, AsFd},
     };
 
     use libc::{c_void, socklen_t};
@@ -102,10 +102,9 @@ mod net {
         }
     }
 
-    impl AsRawFd for UsbipStream {
-        #[inline(always)]
-        fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
-            self.get().as_raw_fd()
+    impl AsFd for UsbipStream {
+        fn as_fd(&self) -> std::os::unix::prelude::BorrowedFd<'_> {
+            self.get().as_fd()
         }
     }
 }

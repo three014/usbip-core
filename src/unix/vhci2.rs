@@ -27,7 +27,7 @@ use std::{
     net::{AddrParseError, IpAddr, SocketAddr},
     num::{NonZeroUsize, ParseIntError},
     ops::Deref,
-    os::fd::AsRawFd,
+    os::fd::{AsFd, AsRawFd, BorrowedFd},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -39,7 +39,7 @@ use crate::{
     },
     net::{OpCommon, OpImportReply, OpImportRequest, Protocol, Recv, Send, Status},
     unix::net::UsbipStream,
-    util::parse_token,
+    util::{__private::Sealed, parse_token},
     vhci::{base, error2::Error, AttachArgs, HubSpeed},
     DeviceSpeed, DeviceStatus,
 };
@@ -51,6 +51,9 @@ static BUS_TYPE: &str = "platform";
 static DEVICE_NAME: &str = "vhci_hcd.0";
 const SYSFS_PATH_MAX: usize = 255;
 
+/// Used to allow parsing an `Option<AvailableIdev>`
+/// from a string slice, since it isn't an error
+/// to not recieve a full [`AvailableIdev`] object.
 struct MaybeAvailableIdev(Option<AvailableIdev>);
 
 impl Deref for MaybeAvailableIdev {
@@ -137,10 +140,10 @@ pub enum PortRecordError {
 impl fmt::Display for PortRecordError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PortRecordError::Buffer(b) => write!(f, "Buffer Format: {b}"),
-            PortRecordError::Io(i) => write!(f, "I/O: {i}"),
-            PortRecordError::Addr(a) => write!(f, "Address Parsing: {a}"),
-            PortRecordError::Int(i) => write!(f, "Int Parsing: {i}"),
+            PortRecordError::Buffer(b) => write!(f, "{b}"),
+            PortRecordError::Io(i) => write!(f, "{i}"),
+            PortRecordError::Addr(a) => write!(f, "{a}"),
+            PortRecordError::Int(i) => write!(f, "{i}"),
             PortRecordError::Invalid => write!(f, "Invalid port record"),
         }
     }
@@ -326,8 +329,8 @@ struct AvailableIdev {
 struct OpenPorts(Vec<AvailableIdev>);
 
 impl OpenPorts {
-    fn get(&self) -> &Vec<AvailableIdev> {
-        &self.0
+    fn get(&self) -> &[AvailableIdev] {
+        &*self.0
     }
 
     fn get_mut(&mut self) -> &mut Vec<AvailableIdev> {
@@ -452,14 +455,17 @@ impl InnerDriver {
         })
     }
 
+    #[inline(always)]
     const fn udev(&self) -> &udev::Device {
         &self.hc_device
     }
 
+    #[inline(always)]
     const fn num_controllers(&self) -> NonZeroUsize {
         self.num_controllers
     }
 
+    #[inline(always)]
     const fn num_ports(&self) -> NonZeroUsize {
         self.num_ports
     }
@@ -480,7 +486,7 @@ impl InnerDriver {
 
         let mut socket = UsbipStream::connect(&host)?;
 
-        // Query host for usb info
+        // Query host for USB info
         let req = OpCommon::request(Protocol::OP_REQ_IMPORT);
         socket.send(&req)?;
 
@@ -499,30 +505,19 @@ impl InnerDriver {
             );
         }
 
+        // Find open port for attaching USB device
         let speed = usb_dev.speed();
         let dev_id = usb_dev.dev_id();
 
         let port = self.open_ports.get_next(speed).ok_or(Error::NoFreePorts)?;
-
-        let path = self.udev().syspath();
-        let path = StackStr::<SYSFS_PATH_MAX>::try_from(format_args!("{:?}/attach", path)).unwrap();
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path.as_path())
-            .inspect_err(|_| self.open_ports.push(port))?;
-
-        let buf = StackStr::<200>::try_from(format_args!(
-            "{} {} {} {}",
-            port.port,
-            socket.as_raw_fd(),
+        let new_connection = NewConnection {
+            port: port.port,
+            fd: socket.as_fd(),
             dev_id,
-            speed as u32
-        ))
-        .unwrap();
+            speed,
+        };
 
-        file.write_all(buf.as_bytes())
-            .inspect_err(|_| self.open_ports.push(port))?;
+        SysFs::attach(self.udev(), new_connection).inspect_err(|_| self.open_ports.push(port))?;
 
         // Record connection
         if let Err(err) = self.record_connection(port.port, socket.peer_addr()?, bus_id) {
@@ -536,13 +531,92 @@ impl InnerDriver {
         create_state_path()?;
 
         let path = StackStr::<256>::try_from(format_args!("{}/port{}", STATE_PATH, port)).unwrap();
-        let mut file = file_open(path.as_path())?;
+        let mut file = file_open(&*path)?;
         writeln!(file, "{} {}", host, bus_id)?;
 
         Ok(())
     }
+
+    fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
+        if self
+            .open_ports
+            .get()
+            .iter()
+            .find(|open| open.port == port)
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        self.remove_connection(port);
+        SysFs::detach(self.udev(), port)?;
+
+        // TODO: Add some sort of way to add back the port
+
+        Ok(())
+    }
+
+    fn remove_connection(&self, port: u16) {
+        let path = StackStr::<200>::try_from(format_args!("{}/port{}", STATE_PATH, port)).unwrap();
+        let _ = std::fs::remove_file(&*path);
+    }
 }
 
+struct SysFs;
+
+impl SysFs {
+    pub fn attach(udev: &udev::Device, new_connection: NewConnection<'_>) -> std::io::Result<()> {
+        let path = udev.syspath();
+        let path = StackStr::<SYSFS_PATH_MAX>::try_from(format_args!("{:?}/attach", path)).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&*path)?;
+
+        let NewConnection {
+            port,
+            fd,
+            dev_id,
+            speed,
+        } = new_connection;
+        let buf = StackStr::<200>::try_from(format_args!(
+            "{} {} {} {}",
+            port,
+            fd.as_raw_fd(),
+            dev_id,
+            speed as u32
+        ))
+        .unwrap();
+
+        file.write_all(buf.as_bytes())
+    }
+
+    fn detach(udev: &udev::Device, port: u16) -> std::io::Result<()> {
+        let path = udev.syspath();
+        let path = StackStr::<SYSFS_PATH_MAX>::try_from(format_args!("{:?}/detach", path)).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&*path)?;
+        file.write_all(&port.to_ne_bytes())
+    }
+}
+
+struct NewConnection<'a> {
+    pub port: u16,
+    pub fd: BorrowedFd<'a>,
+    pub dev_id: u32,
+    pub speed: DeviceSpeed,
+}
+
+/// Creates the VHCI state path for persisting connection info,
+/// returning if the directory already exists.
+///
+/// # Error
+///
+/// This function will return an error if the path already
+/// exists and is NOT a directory, or if a general I/O error
+/// has occurred.
 fn create_state_path() -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
 
@@ -557,6 +631,7 @@ fn create_state_path() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Opens a file with the preferred settings for VHCI state files.
 fn file_open<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -577,8 +652,9 @@ impl UnixVhciDriver {
         })
     }
 
-    pub fn detach(&mut self, _port: u16) -> crate::vhci::Result<()> {
-        todo!()
+    #[inline(always)]
+    pub fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
+        self.inner.detach(port)
     }
 
     #[inline(always)]
@@ -610,4 +686,23 @@ fn num_controllers(hc_device: &udev::Device) -> crate::vhci::Result<NonZeroUsize
         .try_into()
         .map_err(|_| Error::NoFreePorts)?;
     Ok(count)
+}
+
+pub trait UnixVhciExt: Sealed {
+    fn refresh_open_ports(&mut self);
+}
+
+impl Sealed for UnixVhciDriver {}
+impl UnixVhciExt for UnixVhciDriver {
+    fn refresh_open_ports(&mut self) {
+        let open_ports = InitData {
+            hc_device: self.inner.udev(),
+            num_controllers: self.inner.num_controllers(),
+            num_ports: self.inner.num_ports(),
+        }
+        .try_into()
+        .expect("parsing open port data from open udev context");
+
+        self.inner.open_ports = open_ports;
+    }
 }
