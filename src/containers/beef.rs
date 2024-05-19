@@ -13,9 +13,23 @@ where
     Static(&'static B),
 }
 
-impl<'a, B: std::fmt::Debug> core::fmt::Debug for Beef<'a, B>
+impl<'a, B> Clone for Beef<'a, B>
 where
-    B: 'static + ?Sized + ToOwned,
+    B: ?Sized + ToOwned,
+    <B as ToOwned>::Owned: Clone,
+{
+    fn clone(&self) -> Self {
+        match *self {
+            Beef::Borrowed(borrowed) => Beef::Borrowed(borrowed),
+            Beef::Static(staticc) => Beef::Static(staticc),
+            Beef::Owned(ref owned) => Beef::Owned(owned.clone())
+        }
+    }
+}
+
+impl<'a, B> std::fmt::Debug for Beef<'a, B>
+where
+    B: 'static + ?Sized + ToOwned + std::fmt::Debug,
     <B as ToOwned>::Owned: core::fmt::Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

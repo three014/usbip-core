@@ -1,10 +1,169 @@
 mod udev_helpers;
+mod sysfs {
+    use std::path::Path;
+
+    pub const PATH_MAX: usize = 255;
+
+    pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+    }
+}
 pub mod vhci2;
+pub mod host {
+    use std::{borrow::Cow, path::Path};
+
+    use crate::{containers::beef::Beef, unix::udev_helpers::UdevHelper};
+
+    mod sysfs {
+        use crate::{containers::stacktools::StackStr, unix::sysfs};
+
+        use super::DRIVER_NAME;
+
+        use std::io::Write;
+
+        fn open(driver: &str, attr: &str) -> std::io::Result<std::fs::File> {
+            let path = StackStr::<{ sysfs::PATH_MAX }>::try_from(format_args!(
+                "/sys/bus/usb/drivers/{driver}/{}",
+                attr
+            ))
+            .unwrap();
+
+            sysfs::open(&*path)
+        }
+
+        pub fn match_busid_add(bus_id: &str) -> std::io::Result<()> {
+            let mut sys = open(DRIVER_NAME, "match_busid")?;
+            write!(sys, "add {bus_id}")
+        }
+
+        pub fn match_busid_del(bus_id: &str) -> std::io::Result<()> {
+            let mut sys = open(DRIVER_NAME, "match_busid")?;
+            write!(sys, "del {bus_id}")
+        }
+
+        pub fn bind(bus_id: &str) -> std::io::Result<()> {
+            let mut sys = open(DRIVER_NAME, "bind")?;
+            write!(sys, "{bus_id}")
+        }
+
+        pub fn rebind(bus_id: &str) -> std::io::Result<()> {
+            let mut sys = open(DRIVER_NAME, "rebind")?;
+            write!(sys, "{bus_id}")
+        }
+
+        pub fn unbind_other(udev: &udev::Device, bus_id: &str) -> std::io::Result<()> {
+            if let Some(driver) = udev.driver() {
+                let mut sys = open(
+                    driver.to_str().expect("turning udev driver name into utf8"),
+                    "unbind",
+                )?;
+                write!(sys, "{bus_id}")
+            } else {
+                Ok(())
+            }
+        }
+
+        pub fn unbind(bus_id: &str) -> std::io::Result<()> {
+            let mut sys = open(DRIVER_NAME, "unbind")?;
+            write!(sys, "{bus_id}")
+        }
+    }
+
+    static DRIVER_NAME: &str = "usbip-host";
+
+    pub enum Error {
+        BusIdNotFound,
+        BindLoop(Cow<'static, Path>),
+        AlreadyBound(Cow<'static, str>),
+        UnbindFailed(Cow<'static, str>, std::io::Error),
+        BindFailed(Cow<'static, str>, std::io::Error),
+    }
+
+    pub type Result<T> = std::result::Result<T, Error>;
+
+    pub struct Driver {
+        context: udev::Udev,
+    }
+
+    impl Driver {
+        #[inline]
+        pub fn new() -> std::io::Result<Self> {
+            Ok(Self {
+                context: udev::Udev::new()?,
+            })
+        }
+
+        pub fn bind(&self, bus_id: &str) -> Result<()> {
+            // Do verification first
+            let dev = udev::Device::from_subsystem_sysname_with_context(
+                self.context.clone(),
+                "usb".to_owned(),
+                bus_id.to_owned(),
+            )
+            .map_err(|_| Error::BusIdNotFound)?;
+
+            let dev_path = dev.devpath();
+            if dev_path.to_str().unwrap().contains(DRIVER_NAME) {
+                return Err(Error::BindLoop(Beef::Borrowed(Path::new(dev_path)).into()));
+            }
+
+            self.unbind_other(bus_id)?;
+
+            // Bind away!
+            sysfs::match_busid_add(bus_id).map_err(|err| Error::BindFailed(Beef::Borrowed(bus_id).into(), err))?;
+            sysfs::bind(bus_id).map_err(|err| Error::BindFailed(Beef::Borrowed(bus_id).into(), err))?;
+
+            todo!()
+        }
+
+        fn unbind_other(&self, bus_id: &str) -> Result<()> {
+            let dev = udev::Device::from_subsystem_sysname_with_context(
+                self.context.clone(),
+                "usb".to_owned(),
+                bus_id.to_owned(),
+            )
+            .map_err(|_| Error::BusIdNotFound)?;
+
+            let bus_id = Beef::Borrowed(bus_id);
+            let parse_sysattr_bus_id = bus_id.clone();
+            let b_dev_class: u32 =
+                dev.parse_sysattr(Beef::Static("bDeviceClass"))
+                    .map_err(|err| match err {
+                        crate::unix::udev_helpers::ParseAttributeError::NoAttribute(_) => {
+                            Error::UnbindFailed(
+                                parse_sysattr_bus_id.into(),
+                                std::io::Error::other("Attribute does not exist"),
+                            )
+                        }
+                        _ => unreachable!(),
+                    })?;
+
+            if b_dev_class == 9 {
+                return Err(Error::UnbindFailed(
+                    bus_id.into(),
+                    std::io::Error::other("can't unbind a hub"),
+                ));
+            }
+
+            if let Some(driver) = dev.driver() {
+                if driver.to_str().unwrap() == DRIVER_NAME {
+                    return Err(Error::AlreadyBound(bus_id.into()));
+                }
+            }
+
+            sysfs::unbind_other(&dev, &bus_id)
+                .map_err(|err| Error::UnbindFailed(bus_id.into(), err))
+        }
+    }
+}
 mod net {
     use std::{
         ffi::c_int,
         net::{SocketAddr, TcpStream},
-        os::fd::{AsRawFd, AsFd},
+        os::fd::{AsFd, AsRawFd},
     };
 
     use libc::{c_void, socklen_t};

@@ -6,7 +6,7 @@ mod tests {
 
     #[test]
     fn driver_opens() {
-        UnixVhciDriver::open().unwrap();
+        Driver::open().unwrap();
     }
 
     #[test]
@@ -19,6 +19,53 @@ mod tests {
         assert_eq!(record.bus_id(), "1-1");
     }
 }
+mod sysfs {
+    use crate::{containers::stacktools::StackStr, unix::sysfs, DeviceSpeed};
+
+    use std::{
+        io::Write,
+        os::fd::{AsRawFd, BorrowedFd},
+        path::Path,
+    };
+
+    fn open(syspath: &Path, attr: &str) -> std::io::Result<std::fs::File> {
+        let path =
+            StackStr::<{ sysfs::PATH_MAX }>::try_from(format_args!("{}/{attr}", syspath.display()))
+                .unwrap();
+        sysfs::open(&*path)
+    }
+
+    pub fn detach(udev: &udev::Device, port: u16) -> std::io::Result<()> {
+        let mut sys = open(udev.syspath(), "detach")?;
+        write!(sys, "{port}")
+    }
+
+    pub fn attach(udev: &udev::Device, new_connection: NewConnection) -> std::io::Result<()> {
+        let mut sys = open(udev.syspath(), "attach")?;
+        let NewConnection {
+            port,
+            fd,
+            dev_id,
+            speed,
+        } = new_connection;
+
+        write!(
+            sys,
+            "{} {} {} {}",
+            port,
+            fd.as_raw_fd(),
+            dev_id,
+            speed as u32
+        )
+    }
+
+    pub struct NewConnection<'a> {
+        pub port: u16,
+        pub fd: BorrowedFd<'a>,
+        pub dev_id: u32,
+        pub speed: DeviceSpeed,
+    }
+}
 
 use core::fmt::{self, Write};
 use std::{
@@ -27,7 +74,7 @@ use std::{
     net::{AddrParseError, IpAddr, SocketAddr},
     num::{NonZeroUsize, ParseIntError},
     ops::Deref,
-    os::fd::{AsFd, AsRawFd, BorrowedFd},
+    os::fd::AsFd,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -38,7 +85,7 @@ use crate::{
         stacktools::{self, StackStr},
     },
     net::{OpCommon, OpImportReply, OpImportRequest, Protocol, Recv, Send, Status},
-    unix::net::UsbipStream,
+    unix::{net::UsbipStream, vhci2::sysfs::NewConnection},
     util::{__private::Sealed, parse_token},
     vhci::{base, error2::Error, AttachArgs, HubSpeed},
     DeviceSpeed, DeviceStatus,
@@ -49,7 +96,6 @@ use super::{udev_helpers::UdevHelper, UdevError};
 pub static STATE_PATH: &str = "/var/run/vhci_hcd";
 static BUS_TYPE: &str = "platform";
 static DEVICE_NAME: &str = "vhci_hcd.0";
-const SYSFS_PATH_MAX: usize = 255;
 
 /// Used to allow parsing an `Option<AvailableIdev>`
 /// from a string slice, since it isn't an error
@@ -420,19 +466,15 @@ impl TryFrom<InitData<'_>> for UnixImportedDevices {
     }
 }
 
-pub struct UnixVhciDriver {
-    inner: InnerDriver,
-}
-
-struct InnerDriver {
+pub struct Driver {
     hc_device: udev::Device,
     open_ports: OpenPorts,
     num_controllers: NonZeroUsize,
     num_ports: NonZeroUsize,
 }
 
-impl InnerDriver {
-    fn try_open() -> crate::vhci::Result<Self> {
+impl Driver {
+    pub fn open() -> crate::vhci::Result<Self> {
         let hc_device = udev::Device::from_subsystem_sysname(BUS_TYPE.into(), DEVICE_NAME.into())
             .map_err(|_| Error::DriverNotFound)?;
         let num_ports: NonZeroUsize = hc_device
@@ -470,7 +512,17 @@ impl InnerDriver {
         self.num_ports
     }
 
-    fn imported_devices(&self) -> crate::vhci::Result<UnixImportedDevices> {
+    #[inline(always)]
+    fn open_ports_mut(&mut self) -> &mut OpenPorts {
+        &mut self.open_ports
+    }
+
+    #[inline(always)]
+    fn open_ports(&self) -> &OpenPorts {
+        &self.open_ports
+    }
+
+    pub fn imported_devices(&self) -> crate::vhci::Result<UnixImportedDevices> {
         Ok(UnixImportedDevices::try_from(InitData {
             hc_device: self.udev(),
             num_controllers: self.num_controllers(),
@@ -481,7 +533,7 @@ impl InnerDriver {
         ))
     }
 
-    fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
+    pub fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
         let AttachArgs { host, bus_id } = args;
 
         let mut socket = UsbipStream::connect(&host)?;
@@ -509,15 +561,21 @@ impl InnerDriver {
         let speed = usb_dev.speed();
         let dev_id = usb_dev.dev_id();
 
-        let port = self.open_ports.get_next(speed).ok_or(Error::NoFreePorts)?;
-        let new_connection = NewConnection {
-            port: port.port,
-            fd: socket.as_fd(),
-            dev_id,
-            speed,
-        };
+        let port = self
+            .open_ports_mut()
+            .get_next(speed)
+            .ok_or(Error::NoFreePorts)?;
 
-        SysFs::attach(self.udev(), new_connection).inspect_err(|_| self.open_ports.push(port))?;
+        sysfs::attach(
+            self.udev(),
+            NewConnection {
+                port: port.port,
+                fd: socket.as_fd(),
+                dev_id,
+                speed,
+            },
+        )
+        .inspect_err(|_| self.open_ports_mut().push(port))?;
 
         // Record connection
         if let Err(err) = self.record_connection(port.port, socket.peer_addr()?, bus_id) {
@@ -537,9 +595,9 @@ impl InnerDriver {
         Ok(())
     }
 
-    fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
+    pub fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
         if self
-            .open_ports
+            .open_ports()
             .get()
             .iter()
             .find(|open| open.port == port)
@@ -549,7 +607,7 @@ impl InnerDriver {
         }
 
         self.remove_connection(port);
-        SysFs::detach(self.udev(), port)?;
+        sysfs::detach(self.udev(), port)?;
 
         // TODO: Add some sort of way to add back the port
 
@@ -560,53 +618,6 @@ impl InnerDriver {
         let path = StackStr::<200>::try_from(format_args!("{}/port{}", STATE_PATH, port)).unwrap();
         let _ = std::fs::remove_file(&*path);
     }
-}
-
-struct SysFs;
-
-impl SysFs {
-    pub fn attach(udev: &udev::Device, new_connection: NewConnection<'_>) -> std::io::Result<()> {
-        let path = udev.syspath();
-        let path = StackStr::<SYSFS_PATH_MAX>::try_from(format_args!("{:?}/attach", path)).unwrap();
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&*path)?;
-
-        let NewConnection {
-            port,
-            fd,
-            dev_id,
-            speed,
-        } = new_connection;
-        let buf = StackStr::<200>::try_from(format_args!(
-            "{} {} {} {}",
-            port,
-            fd.as_raw_fd(),
-            dev_id,
-            speed as u32
-        ))
-        .unwrap();
-
-        file.write_all(buf.as_bytes())
-    }
-
-    fn detach(udev: &udev::Device, port: u16) -> std::io::Result<()> {
-        let path = udev.syspath();
-        let path = StackStr::<SYSFS_PATH_MAX>::try_from(format_args!("{:?}/detach", path)).unwrap();
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&*path)?;
-        file.write_all(&port.to_ne_bytes())
-    }
-}
-
-struct NewConnection<'a> {
-    pub port: u16,
-    pub fd: BorrowedFd<'a>,
-    pub dev_id: u32,
-    pub speed: DeviceSpeed,
 }
 
 /// Creates the VHCI state path for persisting connection info,
@@ -644,30 +655,6 @@ fn file_open<P: AsRef<Path>>(path: P) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
-impl UnixVhciDriver {
-    #[inline]
-    pub fn open() -> crate::vhci::Result<Self> {
-        Ok(Self {
-            inner: InnerDriver::try_open()?,
-        })
-    }
-
-    #[inline(always)]
-    pub fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
-        self.inner.detach(port)
-    }
-
-    #[inline(always)]
-    pub fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
-        self.inner.attach(args)
-    }
-
-    #[inline(always)]
-    pub fn imported_devices(&self) -> crate::vhci::Result<UnixImportedDevices> {
-        self.inner.imported_devices()
-    }
-}
-
 fn num_controllers(hc_device: &udev::Device) -> crate::vhci::Result<NonZeroUsize> {
     let platform = hc_device.parent().ok_or(Error::DriverNotFound)?;
     let count: NonZeroUsize = platform
@@ -692,17 +679,17 @@ pub trait UnixVhciExt: Sealed {
     fn refresh_open_ports(&mut self);
 }
 
-impl Sealed for UnixVhciDriver {}
-impl UnixVhciExt for UnixVhciDriver {
+impl Sealed for Driver {}
+impl UnixVhciExt for Driver {
     fn refresh_open_ports(&mut self) {
         let open_ports = InitData {
-            hc_device: self.inner.udev(),
-            num_controllers: self.inner.num_controllers(),
-            num_ports: self.inner.num_ports(),
+            hc_device: self.udev(),
+            num_controllers: self.num_controllers(),
+            num_ports: self.num_ports(),
         }
         .try_into()
         .expect("parsing open port data from open udev context");
 
-        self.inner.open_ports = open_ports;
+        self.open_ports = open_ports;
     }
 }

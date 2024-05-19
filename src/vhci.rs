@@ -44,7 +44,7 @@ mod platform {
     #[cfg(unix)]
     pub use crate::unix::vhci2::{
         PortRecord, UnixImportedDevice as ImportedDevice,
-        UnixImportedDevices as ImportedDevices, UnixVhciDriver as Driver, STATE_PATH,
+        UnixImportedDevices as ImportedDevices, Driver, STATE_PATH,
     };
 
     #[cfg(windows)]
@@ -100,7 +100,7 @@ pub mod base {
         }
 
         pub fn bus_id(&self) -> &str {
-            &self.busid
+            &*self.busid
         }
     }
 }
