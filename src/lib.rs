@@ -271,8 +271,8 @@ pub mod net {
         }
 
         /// Consumes an [`OpCommon`] and returns another
-        /// one with the `status` of whatever request
-        /// the remote device made.
+        /// one with the `status` of attempting to fulfill
+        /// the remote device's request.
         #[inline]
         pub const fn reply(self, status: Status) -> Self {
             Self {

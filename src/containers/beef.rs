@@ -4,6 +4,11 @@ use std::{
     ops::Deref,
 };
 
+/// Like [`Cow`], but differentiates between borrowed items
+/// and `'static` items.
+///
+/// Currently doesn't support mutation due to the project
+/// not requiring it at the moment.
 pub enum Beef<'a, B>
 where
     B: 'static + ?Sized + ToOwned,
