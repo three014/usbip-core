@@ -20,28 +20,20 @@ mod tests {
     }
 }
 mod sysfs {
-    use crate::{containers::stacktools::StackStr, unix::sysfs, DeviceSpeed};
+    use crate::{unix::sysfs::SysAttr, DeviceSpeed};
 
     use std::{
         io::Write,
         os::fd::{AsRawFd, BorrowedFd},
-        path::Path,
     };
 
-    fn open(syspath: &Path, attr: &str) -> std::io::Result<std::fs::File> {
-        let path =
-            StackStr::<{ sysfs::PATH_MAX }>::try_from(format_args!("{}/{attr}", syspath.display()))
-                .unwrap();
-        sysfs::open(&*path)
-    }
-
     pub fn detach(udev: &udev::Device, port: u16) -> std::io::Result<()> {
-        let mut sys = open(udev.syspath(), "detach")?;
+        let mut sys = SysAttr::open(udev.syspath().to_str().unwrap(), "detach")?;
         write!(sys, "{port}")
     }
 
     pub fn attach(udev: &udev::Device, new_connection: NewConnection) -> std::io::Result<()> {
-        let mut sys = open(udev.syspath(), "attach")?;
+        let mut sys = SysAttr::open(udev.syspath().to_str().unwrap(), "attach")?;
         let NewConnection {
             port,
             fd,
@@ -91,7 +83,7 @@ use crate::{
     DeviceSpeed, DeviceStatus,
 };
 
-use super::{udev_helpers::UdevHelper, UdevError};
+use super::udev_utils::UdevExt;
 
 pub static STATE_PATH: &str = "/var/run/vhci_hcd";
 static BUS_TYPE: &str = "platform";
@@ -157,7 +149,7 @@ impl FromStr for MaybeUnixImportedDevice {
         let _sockfd = parse_token::<u32>(&mut tokens)?;
         let busid = tokens.next().unwrap().trim();
         let sudev = udev::Device::from_subsystem_sysname("usb".to_owned(), busid.to_owned())?;
-        let usb_dev = crate::UsbDevice::try_from(sudev)?;
+        let usb_dev = crate::UsbDevice::try_from(sudev).map_err(|err| err.into_custom_err())?;
         let idev = UnixImportedDevice {
             base: base::ImportedDevice {
                 vendor: usb_dev.id_vendor,
@@ -401,10 +393,8 @@ struct InitData<'a> {
     num_ports: NonZeroUsize,
 }
 
-impl TryFrom<InitData<'_>> for OpenPorts {
-    type Error = UdevError;
-
-    fn try_from(init: InitData) -> Result<Self, Self::Error> {
+impl From<InitData<'_>> for OpenPorts {
+    fn from(init: InitData<'_>) -> Self {
         let mut attr = StackStr::<20>::try_from(format_args!("status")).unwrap();
         let mut open_ports = Vec::<AvailableIdev>::with_capacity(init.num_ports.get());
 
@@ -416,11 +406,9 @@ impl TryFrom<InitData<'_>> for OpenPorts {
 
             let status = init
                 .hc_device
-                .sysattr(Beef::Borrowed(&attr))
+                .sysattr_str(&*attr)
                 .expect("vhci udev should have this controller");
-            let mut lines = status.lines();
-            lines.next();
-            for line in lines {
+            for line in status.lines().skip(1) {
                 let open_port = if let MaybeAvailableIdev(Some(open_port)) = line.parse().unwrap() {
                     open_port
                 } else {
@@ -430,14 +418,12 @@ impl TryFrom<InitData<'_>> for OpenPorts {
             }
         }
 
-        Ok(OpenPorts(open_ports))
+        OpenPorts(open_ports)
     }
 }
 
-impl TryFrom<InitData<'_>> for UnixImportedDevices {
-    type Error = UdevError;
-
-    fn try_from(init: InitData) -> Result<Self, Self::Error> {
+impl From<InitData<'_>> for UnixImportedDevices {
+    fn from(init: InitData) -> Self {
         let mut attr = StackStr::<20>::new();
         let mut idevs = Vec::new();
 
@@ -449,7 +435,7 @@ impl TryFrom<InitData<'_>> for UnixImportedDevices {
                 write!(attr, "status.{i}").unwrap();
             }
 
-            let status = init.hc_device.sysattr(Beef::Borrowed(&attr))?;
+            let status = init.hc_device.sysattr_str(&*attr).unwrap();
             for line in status.lines().skip(1) {
                 let idev = if let MaybeUnixImportedDevice(Some(idev)) = line
                     .parse()
@@ -462,7 +448,7 @@ impl TryFrom<InitData<'_>> for UnixImportedDevices {
                 idevs.push(idev);
             }
         }
-        Ok(UnixImportedDevices(idevs.into_boxed_slice()))
+        UnixImportedDevices(idevs.into_boxed_slice())
     }
 }
 
@@ -478,16 +464,14 @@ impl Driver {
         let hc_device = udev::Device::from_subsystem_sysname(BUS_TYPE.into(), DEVICE_NAME.into())
             .map_err(|_| Error::DriverNotFound)?;
         let num_ports: NonZeroUsize = hc_device
-            .parse_sysattr(Beef::Static("nports"))
+            .sysattr("nports")
             .expect("udev should have this attribute");
         let num_controllers = num_controllers(&hc_device)?;
         let open_ports = InitData {
             hc_device: &hc_device,
             num_controllers,
             num_ports,
-        }
-        .try_into()
-        .expect("udev should have this information if udev is valid");
+        }.into();
 
         Ok(Self {
             hc_device,

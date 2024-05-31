@@ -1,6 +1,74 @@
-mod udev_helpers;
+mod udev_utils {
+    use std::str::FromStr;
+
+    use crate::util::__private::Sealed;
+
+    pub trait UdevExt: Sealed {
+        fn sysattr<T>(&self, attr: &str) -> Result<T, Error<T::Err>>
+        where
+            T: FromStr;
+        fn sysattr_str(&self, attr: &str) -> Result<&str, Error<()>>;
+    }
+
+    impl Sealed for udev::Device {}
+    impl UdevExt for udev::Device {
+        fn sysattr<T>(&self, attr: &str) -> Result<T, Error<T::Err>>
+        where
+            T: FromStr,
+        {
+            self.attribute_value(attr)
+                .ok_or(Error::AttributeNotFound)?
+                .to_str()
+                .ok_or(Error::NotUtf8)?
+                .parse()
+                .map_err(Error::CustomErr)
+        }
+
+        fn sysattr_str(&self, attr: &str) -> Result<&str, Error<()>> {
+            self.attribute_value(attr)
+                .ok_or(Error::AttributeNotFound)?
+                .to_str()
+                .ok_or(Error::NotUtf8)
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum Error<T> {
+        AttributeNotFound,
+        NotUtf8,
+        CustomErr(T),
+    }
+
+    impl<T> Error<T> {
+        /// Consumes `self` and returns the inner
+        /// error if it was the custom error value.
+        ///
+        /// # Panic
+        /// This function panics if `self` was
+        /// not the `Error::CustomErr` variant.
+        pub fn into_custom_err(self) -> T {
+            match self {
+                Error::AttributeNotFound => panic!("udev attribute not found"),
+                Error::NotUtf8 => panic!("udev attribute value not in utf8"),
+                Error::CustomErr(err) => err,
+            }
+        }
+    }
+
+    impl<T: std::error::Error + 'static> Error<T> {
+        pub fn into_dyn(self) -> Error<Box<dyn std::error::Error>> {
+            match self {
+                Error::AttributeNotFound => Error::AttributeNotFound,
+                Error::NotUtf8 => Error::NotUtf8,
+                Error::CustomErr(err) => Error::CustomErr(crate::util::into_dyn_err(err)),
+            }
+        }
+    }
+}
 mod sysfs {
     use std::path::Path;
+
+    use crate::containers::stacktools::StackStr;
 
     pub const PATH_MAX: usize = 255;
 
@@ -10,56 +78,72 @@ mod sysfs {
             .write(true)
             .open(path)
     }
+
+    pub struct SysAttr {
+        attr: std::fs::File,
+    }
+
+    impl SysAttr {
+        pub fn open(path: &str, attr: &str) -> std::io::Result<Self> {
+            let syspath = StackStr::<PATH_MAX>::try_from(format_args!("{path}/{attr}")).unwrap();
+            let file = open(&*syspath)?;
+            Ok(Self { attr: file })
+        }
+    }
+
+    impl std::io::Write for SysAttr {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.attr.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.attr.flush()
+        }
+    }
 }
 pub mod vhci2;
 pub mod host {
-    use std::{borrow::Cow, path::Path};
+    use std::path::PathBuf;
 
-    use crate::{containers::beef::Beef, unix::udev_helpers::UdevHelper};
+    use crate::unix::udev_utils::UdevExt;
 
     mod sysfs {
-        use crate::{containers::stacktools::StackStr, unix::sysfs};
+        use crate::{
+            containers::stacktools::StackStr,
+            unix::sysfs::{SysAttr, PATH_MAX},
+        };
 
-        use super::DRIVER_NAME;
+        use super::SYS_PATH;
 
         use std::io::Write;
 
-        fn open(driver: &str, attr: &str) -> std::io::Result<std::fs::File> {
-            let path = StackStr::<{ sysfs::PATH_MAX }>::try_from(format_args!(
-                "/sys/bus/usb/drivers/{driver}/{}",
-                attr
-            ))
-            .unwrap();
-
-            sysfs::open(&*path)
-        }
-
         pub fn match_busid_add(bus_id: &str) -> std::io::Result<()> {
-            let mut sys = open(DRIVER_NAME, "match_busid")?;
+            let mut sys = SysAttr::open(SYS_PATH, "match_busid")?;
             write!(sys, "add {bus_id}")
         }
 
         pub fn match_busid_del(bus_id: &str) -> std::io::Result<()> {
-            let mut sys = open(DRIVER_NAME, "match_busid")?;
+            let mut sys = SysAttr::open(SYS_PATH, "match_busid")?;
             write!(sys, "del {bus_id}")
         }
 
         pub fn bind(bus_id: &str) -> std::io::Result<()> {
-            let mut sys = open(DRIVER_NAME, "bind")?;
+            let mut sys = SysAttr::open(SYS_PATH, "bind")?;
             write!(sys, "{bus_id}")
         }
 
         pub fn rebind(bus_id: &str) -> std::io::Result<()> {
-            let mut sys = open(DRIVER_NAME, "rebind")?;
+            let mut sys = SysAttr::open(SYS_PATH, "rebind")?;
             write!(sys, "{bus_id}")
         }
 
         pub fn unbind_other(udev: &udev::Device, bus_id: &str) -> std::io::Result<()> {
             if let Some(driver) = udev.driver() {
-                let mut sys = open(
-                    driver.to_str().expect("turning udev driver name into utf8"),
-                    "unbind",
-                )?;
+                let driver = driver.to_str().expect("turning udev driver name into str");
+                let syspath =
+                    StackStr::<PATH_MAX>::try_from(format_args!("/sys/bus/usb/drivers/{driver}"))
+                        .unwrap();
+                let mut sys = SysAttr::open(&*syspath, "unbind")?;
                 write!(sys, "{bus_id}")
             } else {
                 Ok(())
@@ -67,19 +151,20 @@ pub mod host {
         }
 
         pub fn unbind(bus_id: &str) -> std::io::Result<()> {
-            let mut sys = open(DRIVER_NAME, "unbind")?;
+            let mut sys = SysAttr::open(SYS_PATH, "unbind")?;
             write!(sys, "{bus_id}")
         }
     }
 
     static DRIVER_NAME: &str = "usbip-host";
+    static SYS_PATH: &str = "/sys/bus/usb/drivers/usbip-host";
 
     pub enum Error {
         BusIdNotFound,
-        BindLoop(Cow<'static, Path>),
-        AlreadyBound(Cow<'static, str>),
-        UnbindFailed(Cow<'static, str>, std::io::Error),
-        BindFailed(Cow<'static, str>, std::io::Error),
+        BindLoop(PathBuf),
+        AlreadyBound,
+        UnbindFailed(Option<std::io::Error>),
+        BindFailed(std::io::Error),
     }
 
     pub type Result<T> = std::result::Result<T, Error>;
@@ -105,16 +190,15 @@ pub mod host {
             )
             .map_err(|_| Error::BusIdNotFound)?;
 
-            let dev_path = dev.devpath();
-            if dev_path.to_str().unwrap().contains(DRIVER_NAME) {
-                return Err(Error::BindLoop(Beef::Borrowed(Path::new(dev_path)).into()));
+            if dev.devpath().to_str().unwrap().contains(DRIVER_NAME) {
+                return Err(Error::BindLoop(PathBuf::from(dev.devpath())));
             }
 
             self.unbind_other(bus_id)?;
 
             // Bind away!
-            sysfs::match_busid_add(bus_id).map_err(|err| Error::BindFailed(Beef::Borrowed(bus_id).into(), err))?;
-            sysfs::bind(bus_id).map_err(|err| Error::BindFailed(Beef::Borrowed(bus_id).into(), err))?;
+            sysfs::match_busid_add(bus_id).map_err(Error::BindFailed)?;
+            sysfs::bind(bus_id).map_err(Error::BindFailed)?;
 
             todo!()
         }
@@ -127,35 +211,19 @@ pub mod host {
             )
             .map_err(|_| Error::BusIdNotFound)?;
 
-            let bus_id = Beef::Borrowed(bus_id);
-            let parse_sysattr_bus_id = bus_id.clone();
-            let b_dev_class: u32 =
-                dev.parse_sysattr(Beef::Static("bDeviceClass"))
-                    .map_err(|err| match err {
-                        crate::unix::udev_helpers::ParseAttributeError::NoAttribute(_) => {
-                            Error::UnbindFailed(
-                                parse_sysattr_bus_id.into(),
-                                std::io::Error::other("Attribute does not exist"),
-                            )
-                        }
-                        _ => unreachable!(),
-                    })?;
+            let b_dev_class: u32 = dev.sysattr("bDeviceClass").unwrap();
 
             if b_dev_class == 9 {
-                return Err(Error::UnbindFailed(
-                    bus_id.into(),
-                    std::io::Error::other("can't unbind a hub"),
-                ));
+                return Err(Error::UnbindFailed(None));
             }
 
             if let Some(driver) = dev.driver() {
                 if driver.to_str().unwrap() == DRIVER_NAME {
-                    return Err(Error::AlreadyBound(bus_id.into()));
+                    return Err(Error::AlreadyBound);
                 }
             }
 
-            sysfs::unbind_other(&dev, &bus_id)
-                .map_err(|err| Error::UnbindFailed(bus_id.into(), err))
+            sysfs::unbind_other(&dev, &bus_id).map_err(|err| Error::UnbindFailed(Some(err)))
         }
     }
 }
@@ -269,18 +337,11 @@ mod net {
 }
 
 use crate::{
-    containers::{
-        beef::Beef,
-        stacktools::{self, StackStr},
-    },
-    unix::udev_helpers::UdevHelper,
-    BUS_ID_SIZE, DEV_PATH_MAX,
+    containers::stacktools::{self, StackStr},
+    unix::udev_utils::UdevExt,
+    DeviceSpeed, BUS_ID_SIZE, DEV_PATH_MAX,
 };
-use std::{borrow::Cow, ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
-use udev;
-pub use udev_helpers::Error as UdevError;
-
-use udev_helpers::ParseAttributeError;
+use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
 
 pub static USB_IDS: &str = "/usr/share/hwdata/usb.ids";
 
@@ -303,33 +364,35 @@ impl<const N: usize> TryFrom<&Path> for StackStr<N> {
 }
 
 impl TryFrom<udev::Device> for crate::UsbDevice {
-    type Error = ParseAttributeError;
+    type Error = udev_utils::Error<Box<dyn std::error::Error>>;
 
     fn try_from(udev: udev::Device) -> Result<Self, Self::Error> {
-        let path: StackStr<DEV_PATH_MAX> = udev.syspath().try_into()?;
-        let busid: StackStr<BUS_ID_SIZE> = udev.sysname().try_into()?;
-        let id_vendor: u16 = udev.parse_sysattr(Beef::Static("idVendor"))?;
-        let id_product: u16 = udev.parse_sysattr(Beef::Static("idProduct"))?;
-        let busnum: u32 = udev.parse_sysattr(Beef::Static("busnum"))?;
-        let devnum = u32::try_from(
-            udev.devnum()
-                .ok_or(ParseAttributeError::NoAttribute(Cow::Borrowed("devnum")))?,
-        )
-        .unwrap();
-        let speed = udev.parse_sysattr(Beef::Static("speed"))?;
-        let bcd_device: u16 = udev.parse_sysattr(Beef::Static("bcdDevice"))?;
-        let b_device_class: u8 = udev.parse_sysattr(Beef::Static("bDeviceClass"))?;
-        let b_device_subclass: u8 = udev.parse_sysattr(Beef::Static("bDeviceSubClass"))?;
-        let b_device_protocol: u8 = udev.parse_sysattr(Beef::Static("bDeviceProtocol"))?;
-        let b_configuration_value: u8 = udev.parse_sysattr(Beef::Static("bConfigurationValue"))?;
-        let b_num_configurations: u8 = udev
-            .parse_sysattr(Beef::Static("bNumConfigurations"))
-            .ok()
-            .unwrap_or_default();
-        let b_num_interfaces: u8 = udev
-            .parse_sysattr(Beef::Static("bNumInterfaces"))
-            .ok()
-            .unwrap_or_default();
+        let path: StackStr<DEV_PATH_MAX> = udev
+            .syspath()
+            .try_into()
+            .map_err(|err| udev_utils::Error::CustomErr(err).into_dyn())?;
+        let busid: StackStr<BUS_ID_SIZE> = udev
+            .sysname()
+            .try_into()
+            .map_err(|err| udev_utils::Error::CustomErr(err).into_dyn())?;
+        let id_vendor: u16 = udev.sysattr("idVendor").map_err(|err| err.into_dyn())?;
+        let id_product: u16 = udev.sysattr("idProduct").map_err(|err| err.into_dyn())?;
+        let busnum: u32 = udev.sysattr("busnum").map_err(|err| err.into_dyn())?;
+        let devnum: u32 = udev.devnum().ok_or(udev_utils::Error::AttributeNotFound)? as _;
+        let speed: DeviceSpeed = udev.sysattr("speed").map_err(|err| err.into_dyn())?;
+        let bcd_device: u16 = udev.sysattr("bcdDevice").map_err(|err| err.into_dyn())?;
+        let b_device_class: u8 = udev.sysattr("bDeviceClass").map_err(|err| err.into_dyn())?;
+        let b_device_subclass: u8 = udev
+            .sysattr("bDeviceSubClass")
+            .map_err(|err| err.into_dyn())?;
+        let b_device_protocol: u8 = udev
+            .sysattr("bDeviceProtocol")
+            .map_err(|err| err.into_dyn())?;
+        let b_configuration_value: u8 = udev
+            .sysattr("bConfigurationValue")
+            .map_err(|err| err.into_dyn())?;
+        let b_num_configurations: u8 = udev.sysattr("bNumConfigurations").ok().unwrap_or_default();
+        let b_num_interfaces: u8 = udev.sysattr("bNumInterfaces").ok().unwrap_or_default();
 
         Ok(Self {
             path,

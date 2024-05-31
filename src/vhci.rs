@@ -39,7 +39,6 @@ pub mod error2 {
     impl std::error::Error for Error {}
 }
 
-pub(crate) mod error;
 mod platform {
     #[cfg(unix)]
     pub use crate::unix::vhci2::{

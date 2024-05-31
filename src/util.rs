@@ -33,6 +33,10 @@ where
         .parse()
 }
 
+pub fn into_dyn_err<T: std::error::Error + 'static>(err: T) -> Box<dyn std::error::Error> {
+    Box::from(err)
+}
+
 #[inline]
 pub const fn cast_cchar_to_u8(a: &[c_char]) -> &[u8] {
     // SAFETY: The slice is of type c_char, which can

@@ -10,7 +10,7 @@
 //! server-mode for at least Linux.
 
 #[cfg(unix)]
-mod unix;
+pub mod unix;
 #[cfg(windows)]
 mod windows;
 mod platform {
@@ -23,7 +23,6 @@ pub mod names;
 pub mod vhci;
 pub mod containers {
     pub mod beef;
-    mod singleton;
     pub mod stacktools;
     pub mod iterators {
         use std::num::NonZeroU32;

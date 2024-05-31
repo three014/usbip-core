@@ -238,6 +238,8 @@ impl fmt::Display for TryFromStrErr {
     }
 }
 
+impl std::error::Error for TryFromStrErr {}
+
 unsafe impl<const N: usize> crate::util::EncodedSize for StackStr<N> {
     const ENCODED_SIZE_OF: usize = N;
 }
