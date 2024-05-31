@@ -3,7 +3,9 @@ use windows::Win32::{
     Foundation::WIN32_ERROR,
 };
 
+mod util;
 pub mod vhci {
+    pub mod ioctl;
     use std::{
         ffi::OsString,
         fs::File,
@@ -26,16 +28,13 @@ pub mod vhci {
 
     use crate::{
         containers::stacktools::StackStr,
-        vhci::{base, error2::Error},
-        windows::vhci::utils::ioctl,
+        vhci::{base, error2::Error, AttachArgs},
         BUS_ID_SIZE,
     };
 
-    use super::Win32Error;
+    pub use ioctl::DoorError;
 
-    pub use utils::ioctl::DoorError;
-
-    mod utils;
+    use super::util;
 
     pub static STATE_PATH: &str = "";
     const GUID_DEVINTERFACE_USB_HOST_CONTROLLER: GUID = GUID::from_values(
@@ -44,12 +43,6 @@ pub mod vhci {
         0x4FCC,
         [0x87, 0xEB, 0xE5, 0x51, 0x5A, 0x09, 0x35, 0xC0],
     );
-
-    #[derive(Debug)]
-    pub struct AttachArgs<'a> {
-        pub host: SocketAddr,
-        pub bus_id: &'a str,
-    }
 
     pub struct DeviceLocation {
         host: SocketAddr,
@@ -68,6 +61,7 @@ pub mod vhci {
     #[derive(Debug)]
     pub struct PortRecord {
         base: base::PortRecord,
+        port: u16
     }
 
     impl From<ioctl::PortRecord> for PortRecord {
@@ -77,8 +71,8 @@ pub mod vhci {
                 base: base::PortRecord {
                     host: host.to_socket_addrs().unwrap().next().unwrap(),
                     busid: value.busid,
-                    port: value.port as u16,
                 },
+                port: value.port as u16,
             }
         }
     }
@@ -185,7 +179,7 @@ pub mod vhci {
         }
 
         fn path() -> crate::vhci::Result<PathBuf> {
-            let v = utils::get_device_interface_list(
+            let v = util::get_device_interface_list(
                 GUID_DEVINTERFACE_USB_HOST_CONTROLLER,
                 PCWSTR::null(),
                 CM_GET_DEVICE_INTERFACE_LIST_PRESENT,

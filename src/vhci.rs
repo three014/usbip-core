@@ -48,7 +48,7 @@ mod platform {
 
     #[cfg(windows)]
     pub use crate::windows::vhci::{
-        AttachArgs, PortRecord, WindowsImportedDevice as ImportedDevice,
+        PortRecord, WindowsImportedDevice as ImportedDevice,
         WindowsImportedDevices as ImportedDevices, WindowsVhciDriver as Driver, STATE_PATH,
     };
 }

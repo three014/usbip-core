@@ -9,9 +9,8 @@ use windows::{
     },
 };
 
-use super::Win32Error;
+use crate::windows::Win32Error;
 
-pub mod ioctl;
 pub mod consts {
     pub const NI_MAXSERV: usize = 32;
     pub const NI_MAXHOST: usize = 1025;
