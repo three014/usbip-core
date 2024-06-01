@@ -48,17 +48,13 @@
 
 use core::fmt;
 use std::any::Any;
-use std::ffi::{c_char, OsStr, OsString};
+use std::ffi::c_char;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
-use std::ops::Not;
-use std::os;
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::num::NonZeroU32;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 use std::str::FromStr;
 
-use bincode::de::read::Reader as _;
 use bincode::de::read::{BorrowReader, Reader};
 use bincode::de::{BorrowDecoder, Decoder};
 use bincode::{impl_borrow_decode, Decode, Encode};
@@ -282,7 +278,7 @@ impl bincode::Encode for DeviceLocation<'_> {
         PortRecord {
             port: 0,
             busid: StackStr::try_from(self.bus_id)
-                .map_err(|err| bincode::error::EncodeError::UnexpectedEnd)?,
+                .map_err(|_| bincode::error::EncodeError::UnexpectedEnd)?,
             service: StackStr::try_from(format_args!("{}", self.host.port()))
                 .expect("converting a port number into a 32 byte stack string"),
             host: StackStr::try_from(format_args!("{}", self.host.ip()))
@@ -574,7 +570,7 @@ impl FromStr for OwnedDeviceLocation {
 }
 
 #[derive(bincode::Decode, bincode::Encode)]
-pub struct WideChar(u16);
+struct WideChar(u16);
 
 unsafe impl EncodedSize for WideChar {
     const ENCODED_SIZE_OF: usize = core::mem::size_of::<u16>();
@@ -622,7 +618,11 @@ pub enum DoorError {
 
 impl fmt::Display for DoorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        match self {
+            DoorError::Send(s) => s.fmt(f),
+            DoorError::Recv(r) => r.fmt(f),
+            DoorError::Io(i) => i.fmt(f),
+        }
     }
 }
 
@@ -644,52 +644,24 @@ impl From<std::io::Error> for DoorError {
     }
 }
 
-struct EncodeHelper2<'a, I: IoControl, ES: bincode::enc::Encoder + 'static>(
-    &'a I,
-    fn(&I, &mut IoctlEncoder) -> Result<(), bincode::error::EncodeError>,
-    PhantomData<ES>,
-);
-
-impl<I: IoControl, ES: bincode::enc::Encoder + 'static> bincode::Encode
-    for EncodeHelper2<'_, I, ES>
-{
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        let Self(ioctl, send, _) = self;
-        // SAFETY: Types `E` and `ES` are the exact same type
-        let encoder = unsafe { std::mem::transmute::<&mut E, &mut ES>(encoder) };
-        let ioctl_encoder = (encoder as &mut dyn Any)
-            .downcast_mut::<IoctlEncoder>()
-            .unwrap();
-        send(ioctl, ioctl_encoder)
-    }
-}
-
-fn encode_to_vec<E: bincode::Encode>(
-    val: E,
+fn encode_to_vec<I: IoControl>(
+    ioctl: &I,
     config: BincodeConfig,
-) -> Result<Vec<u8>, bincode::error::EncodeError> {
-    let size = {
-        let writer = AlmostGenericWriter::Size(bincode::enc::write::SizeWriter::default());
-        let mut size_writer = bincode::enc::EncoderImpl::<_, _>::new(writer, config);
-        val.encode(&mut size_writer)?;
-        size_writer.into_writer().bytes_written()
-    };
-    let writer = AlmostGenericWriter::Vec(VecWriter::with_capacity(size));
-    let mut encoder = bincode::enc::EncoderImpl::<_, _>::new(writer, config);
-    val.encode(&mut encoder)?;
-    Ok(encoder.into_writer().into_vec().unwrap())
-}
-
-impl<'a, I: IoControl> EncodeHelper2<'a, I, IoctlEncoder> {
-    fn new(
-        ioctl: &'a I,
-        send: fn(&I, &mut IoctlEncoder) -> Result<(), bincode::error::EncodeError>,
-    ) -> Self {
-        Self(ioctl, send, PhantomData)
-    }
+) -> Result<Option<Vec<u8>>, bincode::error::EncodeError> {
+    I::SEND
+        .map(|send| {
+            let size = {
+                let writer = AlmostGenericWriter::Size(bincode::enc::write::SizeWriter::default());
+                let mut size_writer = bincode::enc::EncoderImpl::<_, _>::new(writer, config);
+                send(ioctl, &mut size_writer)?;
+                size_writer.into_writer().bytes_written()
+            };
+            let writer = AlmostGenericWriter::Vec(VecWriter::with_capacity(size));
+            let mut encoder = bincode::enc::EncoderImpl::<_, _>::new(writer, config);
+            send(ioctl, &mut encoder)?;
+            Ok(encoder.into_writer().into_vec().unwrap())
+        })
+        .transpose()
 }
 
 pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output, DoorError> {
@@ -697,9 +669,7 @@ pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output
     let code = I::ctrl_code().into_u32();
     let mut door = Door::new(handle, code);
 
-    let input = I::SEND
-        .map(|send| encode_to_vec(EncodeHelper2::new(&ioctl, send), config))
-        .transpose()?;
+    let input = encode_to_vec(&ioctl, config)?;
     let input_ref = input.as_ref().map(|buf| buf.as_slice());
 
     match I::RECV {
