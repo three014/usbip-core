@@ -85,9 +85,61 @@ type BincodeConfig = bincode::config::Configuration<
     bincode::config::NoLimit,
 >;
 
-type IoctlEncoder = bincode::enc::EncoderImpl<bincode::enc::write::SizeWriter, BincodeConfig>;
-
+// New idea: Create a writer that rips off the bincode writers, then use that as the concrete type.
+type IoctlEncoder = bincode::enc::EncoderImpl<AlmostGenericWriter, BincodeConfig>;
 type IoctlDecoder<'a> = bincode::de::DecoderImpl<SliceReader<'a>, BincodeConfig>;
+
+#[derive(Default)]
+pub struct VecWriter {
+    inner: Vec<u8>,
+}
+
+impl VecWriter {
+    /// Create a new vec writer with the given capacity
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            inner: Vec::with_capacity(cap),
+        }
+    }
+}
+
+impl bincode::enc::write::Writer for VecWriter {
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) -> Result<(), bincode::error::EncodeError> {
+        self.inner.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
+pub enum AlmostGenericWriter {
+    Size(bincode::enc::write::SizeWriter),
+    Vec(VecWriter),
+}
+
+impl AlmostGenericWriter {
+    fn bytes_written(&self) -> usize {
+        match self {
+            AlmostGenericWriter::Size(w) => w.bytes_written,
+            AlmostGenericWriter::Vec(w) => w.inner.len(),
+        }
+    }
+
+    fn into_vec(self) -> Option<Vec<u8>> {
+        match self {
+            AlmostGenericWriter::Vec(w) => Some(w.inner),
+            _ => panic!("not a VecWriter!"),
+        }
+    }
+}
+
+impl bincode::enc::write::Writer for AlmostGenericWriter {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), bincode::error::EncodeError> {
+        match self {
+            AlmostGenericWriter::Size(w) => w.write(bytes),
+            AlmostGenericWriter::Vec(w) => w.write(bytes),
+        }
+    }
+}
 
 pub struct SliceReader<'a> {
     reader: bincode::de::read::SliceReader<'a>,
@@ -606,13 +658,29 @@ impl<I: IoControl, ES: bincode::enc::Encoder + 'static> bincode::Encode
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
         let Self(ioctl, send, _) = self;
-        // This all feels so illegal, I need to test if this works somehow
+        // SAFETY: Types `E` and `ES` are the exact same type
         let encoder = unsafe { std::mem::transmute::<&mut E, &mut ES>(encoder) };
         let ioctl_encoder = (encoder as &mut dyn Any)
             .downcast_mut::<IoctlEncoder>()
             .unwrap();
         send(ioctl, ioctl_encoder)
     }
+}
+
+fn encode_to_vec<E: bincode::Encode>(
+    val: E,
+    config: BincodeConfig,
+) -> Result<Vec<u8>, bincode::error::EncodeError> {
+    let size = {
+        let writer = AlmostGenericWriter::Size(bincode::enc::write::SizeWriter::default());
+        let mut size_writer = bincode::enc::EncoderImpl::<_, _>::new(writer, config);
+        val.encode(&mut size_writer)?;
+        size_writer.into_writer().bytes_written()
+    };
+    let writer = AlmostGenericWriter::Vec(VecWriter::with_capacity(size));
+    let mut encoder = bincode::enc::EncoderImpl::<_, _>::new(writer, config);
+    val.encode(&mut encoder)?;
+    Ok(encoder.into_writer().into_vec().unwrap())
 }
 
 impl<'a, I: IoControl> EncodeHelper2<'a, I, IoctlEncoder> {
@@ -630,7 +698,7 @@ pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output
     let mut door = Door::new(handle, code);
 
     let input = I::SEND
-        .map(|send| bincode::encode_to_vec(EncodeHelper2::new(&ioctl, send), config))
+        .map(|send| encode_to_vec(EncodeHelper2::new(&ioctl, send), config))
         .transpose()?;
     let input_ref = input.as_ref().map(|buf| buf.as_slice());
 
