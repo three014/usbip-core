@@ -204,12 +204,15 @@ enum DriverError {
     DevNotConnected = 0x8007048F,
 }
 
-pub enum OutputFn<T, U> {
-    Recv {
+pub enum OutputFn<T, U: Iterator<Item = usize>> {
+    RecvDyn {
         recv: fn(&mut IoctlDecoder) -> DecResult<T>,
         regrow_strategy: fn() -> U,
     },
-    Create(fn() -> T),
+    RecvStatic {
+        recv: fn(&mut IoctlDecoder) -> DecResult<T>,
+    },
+    RecvNone(fn() -> T),
 }
 
 /// The main trait for defining an ioctl function
@@ -334,7 +337,7 @@ impl IoControl for Detach {
             size.encode(encoder)?;
             ioctl.port.encode(encoder)
         });
-    const RECV: OutputFn<Self::Output, Self::RegrowIter> = OutputFn::Create(Default::default);
+    const RECV: OutputFn<Self::Output, Self::RegrowIter> = OutputFn::RecvNone(Default::default);
 }
 
 /// Used to request for the vhci driver
@@ -361,7 +364,7 @@ impl IoControl for Attach<'_> {
             ioctl.location.encode(encoder)?;
             Ok(())
         });
-    const RECV: OutputFn<Self::Output, Self::RegrowIter> = OutputFn::Recv {
+    const RECV: OutputFn<Self::Output, Self::RegrowIter> = OutputFn::RecvDyn {
         recv: |decoder| {
             decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
             decoder.reader().consume(core::mem::size_of::<u32>());
@@ -481,7 +484,7 @@ impl IoControl for GetImportedDevices {
             SizeOf((ImportedDevice::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32)
                 .encode(encoder)
         });
-    const RECV: OutputFn<Self::Output, Self::RegrowIter> = OutputFn::Recv {
+    const RECV: OutputFn<Self::Output, Self::RegrowIter> = OutputFn::RecvDyn {
         recv: |decoder| {
             decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
             decoder.reader().consume(core::mem::size_of::<u32>());
@@ -602,7 +605,7 @@ impl IoControl for GetPersistentDevices {
     const FUNCTION: Function = Function::GetPersistent;
     const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> =
         None;
-    const RECV: OutputFn<Self::Output, Self::RegrowIter> = OutputFn::Recv {
+    const RECV: OutputFn<Self::Output, Self::RegrowIter> = OutputFn::RecvDyn {
         recv: |decoder| {
             let len = decoder.borrow_reader().len();
             let buf = decoder.borrow_reader().take_bytes(len)?;
@@ -691,7 +694,7 @@ pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output
     let input_ref = input.as_ref().map(|buf| buf.as_slice());
 
     match I::RECV {
-        OutputFn::Recv {
+        OutputFn::RecvDyn {
             recv,
             regrow_strategy,
         } => {
@@ -727,8 +730,11 @@ pub fn relay<I: IoControl>(handle: BorrowedHandle, ioctl: I) -> Result<I::Output
             let reader = SliceReader::new(&output);
             let mut decoder = bincode::de::DecoderImpl::new(reader, config);
             Ok(recv(&mut decoder)?)
-        }
-        OutputFn::Create(create) => {
+        },
+        OutputFn::RecvStatic { recv } => {
+            todo!()
+        },
+        OutputFn::RecvNone(create) => {
             door.read_write(input_ref, None)?;
             Ok(create())
         }
