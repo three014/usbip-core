@@ -80,8 +80,11 @@ type BincodeConfig = bincode::config::Configuration<
 >;
 
 // New idea: Create a writer that rips off the bincode writers, then use that as the concrete type.
-type IoctlEncoder = bincode::enc::EncoderImpl<AlmostGenericWriter, BincodeConfig>;
+type IoctlEncoder = bincode::enc::EncoderImpl<ConcreteWriter, BincodeConfig>;
 type IoctlDecoder<'a> = bincode::de::DecoderImpl<SliceReader<'a>, BincodeConfig>;
+
+type EncResult = Result<(), bincode::error::EncodeError>;
+type DecResult<T> = Result<T, bincode::error::DecodeError>;
 
 #[derive(Default)]
 pub struct VecWriter {
@@ -99,36 +102,46 @@ impl VecWriter {
 
 impl bincode::enc::write::Writer for VecWriter {
     #[inline(always)]
-    fn write(&mut self, bytes: &[u8]) -> Result<(), bincode::error::EncodeError> {
+    fn write(&mut self, bytes: &[u8]) -> EncResult {
         self.inner.extend_from_slice(bytes);
         Ok(())
     }
 }
 
-pub enum AlmostGenericWriter {
+pub struct ConcreteWriter {
+    inner: AlmostGenericWriter,
+}
+
+impl ConcreteWriter {
+    const fn new(writer: AlmostGenericWriter) -> Self {
+        Self { inner: writer }
+    }
+}
+
+enum AlmostGenericWriter {
     Size(bincode::enc::write::SizeWriter),
     Vec(VecWriter),
 }
 
-impl AlmostGenericWriter {
+impl ConcreteWriter {
     fn bytes_written(&self) -> usize {
-        match self {
+        match &self.inner {
             AlmostGenericWriter::Size(w) => w.bytes_written,
             AlmostGenericWriter::Vec(w) => w.inner.len(),
         }
     }
 
     fn into_vec(self) -> Option<Vec<u8>> {
-        match self {
+        match self.inner {
             AlmostGenericWriter::Vec(w) => Some(w.inner),
             _ => panic!("not a VecWriter!"),
         }
     }
 }
 
-impl bincode::enc::write::Writer for AlmostGenericWriter {
-    fn write(&mut self, bytes: &[u8]) -> Result<(), bincode::error::EncodeError> {
-        match self {
+impl bincode::enc::write::Writer for ConcreteWriter {
+    fn write(&mut self, bytes: &[u8]) -> EncResult {
+        match &mut self.inner {
             AlmostGenericWriter::Size(w) => w.write(bytes),
             AlmostGenericWriter::Vec(w) => w.write(bytes),
         }
@@ -155,7 +168,7 @@ impl<'a> SliceReader<'a> {
 }
 
 impl<'a> bincode::de::read::Reader for SliceReader<'a> {
-    fn read(&mut self, bytes: &mut [u8]) -> Result<(), bincode::error::DecodeError> {
+    fn read(&mut self, bytes: &mut [u8]) -> DecResult<()> {
         self.reader.read(bytes)
     }
 
@@ -169,7 +182,7 @@ impl<'a> bincode::de::read::Reader for SliceReader<'a> {
 }
 
 impl<'a> bincode::de::read::BorrowReader<'a> for SliceReader<'a> {
-    fn take_bytes(&mut self, length: usize) -> Result<&'a [u8], bincode::error::DecodeError> {
+    fn take_bytes(&mut self, length: usize) -> DecResult<&'a [u8]> {
         self.reader.take_bytes(length)
     }
 }
@@ -193,7 +206,7 @@ enum DriverError {
 
 pub enum OutputFn<T, U> {
     Recv {
-        recv: fn(&mut IoctlDecoder) -> Result<T, bincode::error::DecodeError>,
+        recv: fn(&mut IoctlDecoder) -> DecResult<T>,
         regrow_strategy: fn() -> U,
     },
     Create(fn() -> T),
@@ -219,7 +232,7 @@ where
     type RegrowIter;
     type Output;
     const FUNCTION: Function;
-    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> Result<(), bincode::error::EncodeError>>;
+    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult>;
     const RECV: OutputFn<Self::Output, Self::RegrowIter>;
 
     #[inline(always)]
@@ -242,7 +255,6 @@ pub enum Function {
     GetPersistent,
 }
 
-#[derive(Default)]
 pub struct OnceSize {
     byte_size: usize,
     called: u32,
@@ -259,6 +271,14 @@ impl Iterator for OnceSize {
     }
 }
 
+pub struct NoIter;
+impl Iterator for NoIter {
+    type Item = usize;
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
+}
+
 pub struct DeviceLocation<'a> {
     host: SocketAddr,
     bus_id: &'a str,
@@ -272,7 +292,7 @@ impl bincode::Encode for DeviceLocation<'_> {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
+    ) -> EncResult {
         PortRecord {
             port: 0,
             busid: StackStr::try_from(self.bus_id)
@@ -308,7 +328,7 @@ impl IoControl for Detach {
     type Output = ();
     type RegrowIter = std::ops::Range<usize>;
     const FUNCTION: Function = Function::PlugoutHardware;
-    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> Result<(), bincode::error::EncodeError>> =
+    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> =
         Some(|ioctl, encoder| {
             let size = (Port::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
             size.encode(encoder)?;
@@ -334,7 +354,7 @@ impl IoControl for Attach<'_> {
     type Output = u16;
     type RegrowIter = OnceSize;
     const FUNCTION: Function = Function::PluginHardware;
-    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> Result<(), bincode::error::EncodeError>> =
+    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> =
         Some(|ioctl: &Self, encoder| {
             let size_of = (DeviceLocation::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
             size_of.encode(encoder)?;
@@ -378,7 +398,7 @@ impl bincode::Encode for Port {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
+    ) -> EncResult {
         let port = self.0 as i32;
         port.encode(encoder)
     }
@@ -437,7 +457,7 @@ impl bincode::Encode for PortRecord {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
+    ) -> EncResult {
         use bincode::enc::write::Writer;
         self.port.encode(encoder)?;
         self.busid.encode(encoder)?;
@@ -456,7 +476,7 @@ impl IoControl for GetImportedDevices {
     type RegrowIter =
         std::iter::Map<crate::containers::iterators::BitShiftLeft, fn(usize) -> usize>;
     const FUNCTION: Function = Function::GetImportedDevices;
-    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> Result<(), bincode::error::EncodeError>> =
+    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> =
         Some(|_, encoder| {
             SizeOf((ImportedDevice::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32)
                 .encode(encoder)
@@ -521,7 +541,7 @@ impl bincode::Encode for ImportedDevice {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
+    ) -> EncResult {
         self.record.encode(encoder)?;
         self.devid.encode(encoder)?;
         self.speed.encode(encoder)?;
@@ -578,9 +598,9 @@ pub struct GetPersistentDevices;
 
 impl IoControl for GetPersistentDevices {
     type Output = Vec<OwnedDeviceLocation>;
-    type RegrowIter = crate::containers::iterators::BitShiftLeft;
+    type RegrowIter = BitShiftLeft;
     const FUNCTION: Function = Function::GetPersistent;
-    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> Result<(), bincode::error::EncodeError>> =
+    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> =
         None;
     const RECV: OutputFn<Self::Output, Self::RegrowIter> = OutputFn::Recv {
         recv: |decoder| {
@@ -649,12 +669,12 @@ fn encode_to_vec<I: IoControl>(
     I::SEND
         .map(|send| {
             let size = {
-                let writer = AlmostGenericWriter::Size(bincode::enc::write::SizeWriter::default());
+                let writer = ConcreteWriter::new(AlmostGenericWriter::Size(bincode::enc::write::SizeWriter::default()));
                 let mut size_writer = bincode::enc::EncoderImpl::<_, _>::new(writer, config);
                 send(ioctl, &mut size_writer)?;
                 size_writer.into_writer().bytes_written()
             };
-            let writer = AlmostGenericWriter::Vec(VecWriter::with_capacity(size));
+            let writer = ConcreteWriter::new(AlmostGenericWriter::Vec(VecWriter::with_capacity(size)));
             let mut encoder = bincode::enc::EncoderImpl::<_, _>::new(writer, config);
             send(ioctl, &mut encoder)?;
             Ok(encoder.into_writer().into_vec().unwrap())
