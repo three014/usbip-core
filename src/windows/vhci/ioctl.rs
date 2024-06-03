@@ -47,9 +47,7 @@
 //! for my current model.
 
 use core::fmt;
-use std::any::Any;
 use std::ffi::c_char;
-use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
@@ -247,16 +245,16 @@ pub enum Function {
 #[derive(Default)]
 pub struct OnceSize {
     byte_size: usize,
-    called: bool,
+    called: u32,
 }
 
 impl Iterator for OnceSize {
     type Item = usize;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.called {
-            panic!("function called more than once!")
+        if self.called == 2 {
+            panic!("function called more than twice!")
         }
-        self.called = true;
+        self.called += 1;
         Some(self.byte_size)
     }
 }
@@ -352,7 +350,7 @@ impl IoControl for Attach<'_> {
         },
         regrow_strategy: || OnceSize {
             byte_size: core::mem::size_of::<u32>() + core::mem::size_of::<i32>(),
-            called: false,
+            called: 0,
         },
     };
 }
