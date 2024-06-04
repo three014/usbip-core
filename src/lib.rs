@@ -2,8 +2,8 @@
 //!
 //! A userspace library for interacting with the vhci kernel drivers.
 //!
-//! This is a rust port of two major libraries, [usbip-win2][https://github.com/vadimgrn/usbip-win2]
-//! (Windows) and [usbip-utils][https://github.com/torvalds/linux/tree/master/tools/usb/usbip] (Linux).
+//! This is a rust port of two major libraries, usbip-win2 <https://github.com/vadimgrn/usbip-win2>
+//! (Windows) and usbip-utils <https://github.com/torvalds/linux/tree/master/tools/usb/usbip> (Linux).
 //! 
 //! The goal of this library is to provide a platform-independent interface for sharing USB devices across
 //! the local internet. Currently only client-mode is supported, but future work will focus on supporting
