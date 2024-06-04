@@ -320,7 +320,7 @@ impl Detach {
 
 impl IoControl<0> for Detach {
     type Output = ();
-    type RegrowIter = std::ops::Range<usize>;
+    type RegrowIter = NoIter;
     const FUNCTION: Function = Function::PlugoutHardware;
     const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> = Some(|ioctl, encoder| {
         let size = (Port::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
@@ -724,7 +724,17 @@ pub fn relay<I: IoControl<B>, const B: usize>(
             Ok(recv(&mut decoder)?)
         }
         OutputFn::RecvStatic { recv } => {
-            todo!()
+            let mut output = [0u8; B];
+            let bytes_read = door.read_write(input_ref, Some(&mut output))?;
+            
+            // Following the same idea as above, the first call should have written all the
+            // data to the output buffer, or else we hit some error. Therefore,
+            // the next call to read_write should return Ok(0), or else we caused a bug.
+            assert_eq!(door.read_write(input_ref, Some(&mut output[bytes_read..]))?, 0);
+
+            let reader = SliceReader::new(&output[..bytes_read]);
+            let mut decoder = bincode::de::DecoderImpl::new(reader, config);
+            Ok(recv(&mut decoder)?)
         }
         OutputFn::RecvNone(create) => {
             door.read_write(input_ref, None)?;
