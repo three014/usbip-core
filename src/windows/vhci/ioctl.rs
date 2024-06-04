@@ -70,6 +70,8 @@ type IoctlDecoder<'a> = bincode::de::DecoderImpl<SliceReader<'a>, BincodeConfig>
 type EncResult = Result<(), bincode::error::EncodeError>;
 type DecResult<T> = Result<T, bincode::error::DecodeError>;
 
+const UNUSED: usize = 0;
+
 #[derive(Default)]
 pub struct VecWriter {
     inner: Vec<u8>,
@@ -318,7 +320,7 @@ impl Detach {
     }
 }
 
-impl IoControl<0> for Detach {
+impl IoControl<UNUSED> for Detach {
     type Output = ();
     type RegrowIter = NoIter;
     const FUNCTION: Function = Function::PlugoutHardware;
@@ -327,7 +329,7 @@ impl IoControl<0> for Detach {
         size.encode(encoder)?;
         ioctl.port.encode(encoder)
     });
-    const RECV: Output<Self::Output, Self::RegrowIter, 0> = Output {
+    const RECV: Output<Self::Output, Self::RegrowIter, UNUSED> = Output {
         inner: OutputFn::RecvNone(Default::default),
     };
 }
@@ -459,7 +461,7 @@ impl bincode::Encode for PortRecord {
 
 pub struct GetImportedDevices;
 
-impl IoControl<0> for GetImportedDevices {
+impl IoControl<UNUSED> for GetImportedDevices {
     type Output = Vec<ImportedDevice>;
     type RegrowIter =
         std::iter::Map<crate::containers::iterators::BitShiftLeft, fn(usize) -> usize>;
@@ -468,7 +470,7 @@ impl IoControl<0> for GetImportedDevices {
         SizeOf((ImportedDevice::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32)
             .encode(encoder)
     });
-    const RECV: Output<Self::Output, Self::RegrowIter, 0> = Output {
+    const RECV: Output<Self::Output, Self::RegrowIter, UNUSED> = Output {
         inner: OutputFn::RecvDyn {
             recv: |decoder| {
                 decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
@@ -582,12 +584,12 @@ unsafe impl EncodedSize for WideChar {
 
 pub struct GetPersistentDevices;
 
-impl IoControl<0> for GetPersistentDevices {
+impl IoControl<UNUSED> for GetPersistentDevices {
     type Output = Vec<OwnedDeviceLocation>;
     type RegrowIter = BitShiftLeft;
     const FUNCTION: Function = Function::GetPersistent;
     const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> = None;
-    const RECV: Output<Self::Output, Self::RegrowIter, 0> = Output {
+    const RECV: Output<Self::Output, Self::RegrowIter, UNUSED> = Output {
         inner: OutputFn::RecvDyn {
             recv: |decoder| {
                 let len = decoder.borrow_reader().len();
