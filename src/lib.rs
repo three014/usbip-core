@@ -4,7 +4,7 @@
 //!
 //! This is a rust port of two major libraries, usbip-win2 <https://github.com/vadimgrn/usbip-win2>
 //! (Windows) and usbip-utils <https://github.com/torvalds/linux/tree/master/tools/usb/usbip> (Linux).
-//! 
+//!
 //! The goal of this library is to provide a platform-independent interface for sharing USB devices across
 //! the local internet. Currently only client-mode is supported, but future work will focus on supporting
 //! server-mode for at least Linux.
@@ -65,8 +65,8 @@ pub mod net {
     };
 
     use crate::{
-        containers::stacktools::StackStr,
-        util::__private::Sealed,
+        containers::stacktools::{StackStr, Str},
+        util::{__private::Sealed, self},
         UsbDevice, BUS_ID_SIZE, USBIP_VERSION,
     };
 
@@ -90,9 +90,10 @@ pub mod net {
             const _OP_REQ_UNSPEC = Self::OP_UNSPEC.bits();
             const _OP_REP_UNSPEC = Self::OP_UNSPEC.bits();
 
-            // Retrieve the list of exported USB devices
             const OP_DEVLIST = 0x05;
+            /// Retrieve the list of exported USB devices.
             const OP_REQ_DEVLIST = Self::OP_REQUEST.bits() | Self::OP_DEVLIST.bits();
+            /// Reply with the list of exported USB devices.
             const OP_REP_DEVLIST = Self::OP_REPLY.bits() | Self::OP_DEVLIST.bits();
 
             // Export a USB device to a remote host
@@ -185,7 +186,7 @@ pub mod net {
             .with_fixed_int_encoding()
     }
 
-    /// Convenience trait for encoding and 
+    /// Convenience trait for encoding and
     /// writing the encoded data into a buffer
     /// that implements the [`std::io::Write`]
     /// trait.
@@ -256,7 +257,7 @@ pub mod net {
     impl OpCommon {
         /// Creates an [`OpCommon`] with
         /// `code` as the request.
-        /// 
+        ///
         /// Depending on the [`Protocol`] used,
         /// the remote device will expect
         /// more data to be sent.
@@ -274,15 +275,12 @@ pub mod net {
         /// the remote device's request.
         #[inline]
         pub const fn reply(self, status: Status) -> Self {
-            Self {
-                status,
-                ..self
-            }
+            Self { status, ..self }
         }
 
         /// Performs basic validation on the [`OpCommon`] object.
         ///
-        /// On success, returns the Status code of the [`OpCommon`].
+        /// On success, returns the [`Status`] code of the [`OpCommon`].
         ///
         /// # Error
         ///
@@ -304,7 +302,7 @@ pub mod net {
 
     #[derive(Debug)]
     pub struct OpImportRequest<'a> {
-        bus_id: &'a str,
+        bus_id: Cow<'a, Str<{ BUS_ID_SIZE - 1 }>>,
     }
 
     impl bincode::Encode for OpImportRequest<'_> {
@@ -312,34 +310,38 @@ pub mod net {
             &self,
             encoder: &mut E,
         ) -> Result<(), bincode::error::EncodeError> {
-            let s = StackStr::<BUS_ID_SIZE>::try_from(self.bus_id)
-                .map_err(|_| bincode::error::EncodeError::UnexpectedEnd)?;
+            self.bus_id.as_ref().encode(encoder)
+        }
+    }
 
-            s.encode(encoder)
+    impl bincode::Decode for OpImportRequest<'_> {
+        fn decode<D: bincode::de::Decoder>(
+            decoder: &mut D,
+        ) -> Result<Self, bincode::error::DecodeError> {
+            let s = StackStr::<{ BUS_ID_SIZE - 1 }>::decode(decoder)?;
+
+            util::decode_zero_byte(decoder)?;
+            Ok(OpImportRequest { bus_id: Cow::Owned(s) })
         }
     }
 
     impl<'a> OpImportRequest<'a> {
         /// Constructs a new [`OpImportRequest`]
-        /// out of a [`str`] slice.
+        /// out of a [`str`] slice, returning `None`
+        /// if `bus_id.as_bytes().len() > BUS_ID_SIZE`.
         #[inline(always)]
-        pub const fn new(bus_id: &'a str) -> Self {
-            Self { bus_id }
+        pub const fn new(bus_id: &'a str) -> Option<Self> {
+            if let Some(s) = Str::<{ BUS_ID_SIZE - 1 }>::new(bus_id) {
+                Some(Self {
+                    bus_id: Cow::Borrowed(s),
+                })
+            } else {
+                None
+            }
         }
-    }
 
-    /// The owned version of a [`OpImportRequest`].
-    /// Used for decoding from a buffer, since we
-    /// can't guarantee that the data in this struct
-    /// will last long enough for usage.
-    #[derive(Debug, bincode::Decode)]
-    pub struct OwnedOpImportRequest {
-        bus_id: StackStr<BUS_ID_SIZE>,
-    }
-
-    impl OwnedOpImportRequest {
         #[inline(always)]
-        pub const fn into_inner(self) -> StackStr<BUS_ID_SIZE> {
+        pub const fn into_inner(self) -> Cow<'a, Str<{ BUS_ID_SIZE - 1 }>> {
             self.bus_id
         }
     }
@@ -380,10 +382,10 @@ pub mod net {
 }
 
 use core::fmt;
-use std::{num::ParseIntError, path::Path, str::FromStr};
+use std::{borrow::Cow, num::ParseIntError, path::Path, str::FromStr};
 
-use bincode::de::read::Reader;
-use containers::stacktools::StackStr;
+use bincode::{de::read::Reader, impl_borrow_decode};
+use containers::stacktools::{StackStr, Str};
 
 pub use platform::USB_IDS;
 
@@ -391,10 +393,114 @@ pub const USBIP_VERSION: usize = 0x111;
 pub const DEV_PATH_MAX: usize = 256;
 pub const BUS_ID_SIZE: usize = 32;
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(Debug)]
+pub struct SysPath<'a>(Cow<'a, Str<{ DEV_PATH_MAX - 1 }>>);
+
+impl<'a> SysPath<'a> {
+    #[inline(always)]
+    pub const fn new(s: Cow<'a, Str<{ DEV_PATH_MAX - 1 }>>) -> SysPath<'a> {
+        Self(s)
+    }
+
+    pub const fn new_from_str(s: &'a str) -> Option<SysPath<'a>> {
+        if let Some(s) = Str::new(s) {
+            Some(SysPath(Cow::Borrowed(s)))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_path(&self) -> &Path {
+        Path::new(self.as_str())
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl SysPath<'static> {
+    #[inline(always)]
+    pub const fn new_from_stack(path: StackStr<{ DEV_PATH_MAX - 1 }>) -> SysPath<'static> {
+        Self(Cow::Owned(path))
+    }
+}
+
+impl bincode::Encode for SysPath<'_> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.0.encode(encoder)?;
+
+        // Gotta include the null byte!
+        0u8.encode(encoder)
+    }
+}
+
+impl bincode::Decode for SysPath<'static> {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let s = StackStr::<{ DEV_PATH_MAX - 1 }>::decode(decoder)?;
+
+        // Gotta make sure it's a null byte!
+        util::decode_zero_byte(decoder)?;
+        Ok(SysPath::new_from_stack(s))
+    }
+}
+
+impl<'de> bincode::BorrowDecode<'de> for SysPath<'de> {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let s: &Str<{ DEV_PATH_MAX - 1 }> = bincode::BorrowDecode::borrow_decode(decoder)?;
+
+        util::decode_zero_byte(decoder)?;
+        Ok(SysPath::new(Cow::Borrowed(s)))
+    }
+}
+
+#[derive(Debug)]
+pub struct BusId<'a>(Cow<'a, Str<{ BUS_ID_SIZE - 1 }>>);
+
+impl<'a> BusId<'a> {
+    pub const fn new(bus_id: Cow<'a, Str<{ BUS_ID_SIZE - 1 }>>) -> Self {
+        Self(bus_id)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl bincode::Encode for BusId<'_> {
+    fn encode<E: bincode::enc::Encoder>(&self, encoder: &mut E) -> Result<(), bincode::error::EncodeError> {
+        self.0.as_ref().encode(encoder)?;
+        0u8.encode(encoder)
+    }
+}
+
+impl bincode::Decode for BusId<'static> {
+    fn decode<D: bincode::de::Decoder>(decoder: &mut D) -> Result<Self, bincode::error::DecodeError> {
+        let s = StackStr::<{ BUS_ID_SIZE - 1 }>::decode(decoder)?;
+        util::decode_zero_byte(decoder)?;
+        Ok(BusId::new(Cow::Owned(s)))
+    }
+}
+
+impl<'de> bincode::BorrowDecode<'de> for BusId<'de> {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(decoder: &mut D) -> Result<Self, bincode::error::DecodeError> {
+        let s: &Str<{ BUS_ID_SIZE - 1 }> = bincode::BorrowDecode::borrow_decode(decoder)?;
+        util::decode_zero_byte(decoder)?;
+        Ok(BusId(Cow::Borrowed(s)))
+    }
+}
+
+#[derive(Debug, bincode::Encode)]
 pub struct UsbDevice {
-    path: StackStr<DEV_PATH_MAX>,
-    busid: StackStr<BUS_ID_SIZE>,
+    path: SysPath<'static>,
+    busid: BusId<'static>,
     busnum: u32,
     devnum: u32,
     speed: DeviceSpeed,
@@ -409,13 +515,38 @@ pub struct UsbDevice {
     b_num_interfaces: u8,
 }
 
+impl bincode::Decode for UsbDevice {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        Ok(Self {
+            path: SysPath::decode(decoder)?,
+            busid: BusId::decode(decoder)?,
+            busnum: u32::decode(decoder)?,
+            devnum: u32::decode(decoder)?,
+            speed: DeviceSpeed::decode(decoder)?,
+            id_vendor: u16::decode(decoder)?,
+            id_product: u16::decode(decoder)?,
+            bcd_device: u16::decode(decoder)?,
+            b_device_class: u8::decode(decoder)?,
+            b_device_subclass: u8::decode(decoder)?,
+            b_device_protocol: u8::decode(decoder)?,
+            b_configuration_value: u8::decode(decoder)?,
+            b_num_configurations: u8::decode(decoder)?,
+            b_num_interfaces: u8::decode(decoder)?
+        })
+    }
+}
+
+impl_borrow_decode!(UsbDevice);
+
 impl UsbDevice {
     pub fn path(&self) -> &Path {
         self.path.as_path()
     }
 
     pub fn bus_id(&self) -> &str {
-        &*self.busid
+        self.busid.as_str()
     }
 
     pub const fn dev_id(&self) -> u32 {

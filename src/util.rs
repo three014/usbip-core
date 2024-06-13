@@ -18,6 +18,19 @@ pub unsafe trait EncodedSize {
     const IS_ZERO_SIZED: bool = <Self as EncodedSize>::ENCODED_SIZE_OF == 0;
 }
 
+
+pub fn decode_zero_byte<D: bincode::de::Decoder>(decoder: &mut D) -> Result<(), bincode::error::DecodeError> {
+    // Gotta make sure it's a null byte!
+    use bincode::Decode;
+    if u8::decode(decoder)? != 0u8 {
+        Err(bincode::error::DecodeError::Other(
+            "Nonzero value in the null-byte position",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[allow(dead_code)]
 pub fn parse_token<'a, 'b: 'a, T>(
     tokens: &'a mut impl Iterator<Item = &'b str>,

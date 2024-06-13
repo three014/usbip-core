@@ -1,5 +1,6 @@
 use core::fmt::{self, Write};
 use std::{
+    borrow::Borrow,
     ffi::{c_char, OsStr},
     fmt::Arguments,
     ops::Deref,
@@ -7,50 +8,49 @@ use std::{
     str::Utf8Error,
 };
 
-
 /// A UTF-8 encoded string, but stored entirely on the stack.
-/// 
+///
 /// # Examples
-/// 
+///
 /// You can create a [`StackStr`] with [`StackStr::try_from`]:
-/// 
+///
 /// [`StackStr::try_from`]: TryFrom::try_from
-/// 
+///
 /// ```
 /// use usbip_core::containers::stacktools::StackStr;
-/// 
+///
 /// // We know the string is less than 32 bytes, so we'll use `unwrap()`.
 /// let hello = StackStr::<32>::try_from("Hello, world!").unwrap();
 /// ```
-/// 
+///
 /// [`StackStr`] implements the [`Write`] trait, so you
 /// can use it as a cool stack-allocated buffer.
 ///
 /// ```
 /// use usbip_core::containers::stacktools::StackStr;
 /// use core::fmt::Write;
-/// 
+///
 /// let mut hello = StackStr::<256>::new();
-/// 
+///
 /// write!(&mut hello, "Hello, world!").unwrap();
 /// ```
-/// 
+///
 /// # Deref
-/// 
+///
 /// `StackStr` implements <code>[Deref]<Target = [str]></code>, and
 /// so inherits all of [`str`]'s methods. In addition,
 /// this means you can pass a `StackStr` to a function
 /// which takes a [`&str`] by using an ampersand (`&`):
-/// 
+///
 /// ```
 /// use usbip_core::containers::stacktools::StackStr;
-/// 
+///
 /// fn takes_str(s: &str) { }
-/// 
+///
 /// let s = StackStr::<32>::try_from("Hello").unwrap();
-/// 
+///
 /// takes_str(&s);
-/// 
+///
 /// ```
 #[derive(Debug, PartialEq, Eq)]
 pub struct StackStr<const N: usize> {
@@ -95,15 +95,22 @@ impl<const N: usize> StackStr<N> {
     }
 
     /// Form a [`StackStr`] from an array and a length.
-    /// 
+    ///
     /// The `len` argument is the number of bytes.
-    /// 
+    ///
     /// # SAFETY
-    /// 
+    ///
     /// `buf` MUST be a valid UTF-8 slice.
     #[inline(always)]
     pub const unsafe fn from_raw_parts(buf: [c_char; N], len: usize) -> Self {
         Self { buf, len }
+    }
+}
+
+impl<const N: usize> Borrow<Str<N>> for StackStr<N> {
+    #[inline]
+    fn borrow(&self) -> &Str<N> {
+        Str::new(self).unwrap()
     }
 }
 
@@ -185,11 +192,8 @@ impl<'de, const N: usize> bincode::BorrowDecode<'de> for StackStr<N> {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let (buf, len) = decode_and_validate(decoder)?;
-
-        // SAFETY: The entire array was checked to be a valid UTF-8 string,
-        //         and the length was correctly calculated.
-        Ok(unsafe { Self::from_raw_parts(buf, len) })
+        use bincode::Decode;
+        Ok(StackStr::<N>::decode(decoder)?)
     }
 }
 
@@ -244,9 +248,85 @@ unsafe impl<const N: usize> crate::util::EncodedSize for StackStr<N> {
     const ENCODED_SIZE_OF: usize = N;
 }
 
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct Str<const N: usize> {
+    inner: str,
+}
+
+impl<const N: usize> Str<N> {
+    pub const fn new(s: &str) -> Option<&Self> {
+        if s.as_bytes().len() > N {
+            None
+        } else {
+            // SAFETY: Str has the same layout as str,
+            // so this conversion should be okay
+            unsafe { Some(&*(s as *const str as *const Self)) }
+        }
+    }
+
+    pub const fn as_str(&self) -> &str {
+        &self.inner
+    }
+}
+
+impl<const N: usize> Borrow<str> for Str<N> {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<const N: usize> ToOwned for Str<N> {
+    type Owned = StackStr<N>;
+
+    fn to_owned(&self) -> Self::Owned {
+        let mut s = StackStr::<N>::new();
+        write!(s, "{}", self.as_str()).unwrap();
+        s
+    }
+}
+
+impl<const N: usize> bincode::Encode for Str<N> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        for byte in self.inner.bytes() {
+            byte.encode(encoder)?;
+        }
+
+        for _ in 0..(N - self.inner.len()) {
+            0u8.encode(encoder)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<'de, const N: usize> bincode::BorrowDecode<'de> for &'de Str<N> {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::de::read::BorrowReader;
+
+        let s = decoder.borrow_reader().take_bytes(N)?;
+        let s = std::str::from_utf8(s)
+            .map_err(|err| bincode::error::DecodeError::Utf8 { inner: err })?;
+        Ok(Str::new(s).unwrap())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_strstr_retains_len() {
+        let str = "Hello!";
+        let strstr = Str::<32>::new(str).unwrap();
+        assert_eq!(strstr.as_str().len(), str.len());
+    }
+    
     #[test]
     fn valid_len_try_from_str_works() {
         let str = "Hello!";

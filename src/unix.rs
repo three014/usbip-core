@@ -339,9 +339,9 @@ mod net {
 use crate::{
     containers::stacktools::{self, StackStr},
     unix::udev_utils::UdevExt,
-    DeviceSpeed, BUS_ID_SIZE, DEV_PATH_MAX,
+    DeviceSpeed, BUS_ID_SIZE, DEV_PATH_MAX, SysPath, BusId,
 };
-use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
+use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path, borrow::Cow};
 
 pub static USB_IDS: &str = "/usr/share/hwdata/usb.ids";
 
@@ -367,11 +367,11 @@ impl TryFrom<udev::Device> for crate::UsbDevice {
     type Error = udev_utils::Error<Box<dyn std::error::Error>>;
 
     fn try_from(udev: udev::Device) -> Result<Self, Self::Error> {
-        let path: StackStr<DEV_PATH_MAX> = udev
+        let path: StackStr<{ DEV_PATH_MAX - 1 }> = udev
             .syspath()
             .try_into()
             .map_err(|err| udev_utils::Error::CustomErr(err).into_dyn())?;
-        let busid: StackStr<BUS_ID_SIZE> = udev
+        let busid: StackStr<{ BUS_ID_SIZE - 1 }> = udev
             .sysname()
             .try_into()
             .map_err(|err| udev_utils::Error::CustomErr(err).into_dyn())?;
@@ -395,8 +395,8 @@ impl TryFrom<udev::Device> for crate::UsbDevice {
         let b_num_interfaces: u8 = udev.sysattr("bNumInterfaces").ok().unwrap_or_default();
 
         Ok(Self {
-            path,
-            busid,
+            path: SysPath::new(Cow::Owned(path)),
+            busid: BusId::new(Cow::Owned(busid)),
             id_vendor,
             id_product,
             busnum,
