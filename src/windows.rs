@@ -5,7 +5,8 @@ use windows::Win32::{
 
 mod util;
 pub mod vhci {
-    pub mod ioctl;
+    mod ioctl;
+    pub mod ioctl2;
     use std::{
         ffi::OsString,
         fs::File,
@@ -18,6 +19,7 @@ pub mod vhci {
         path::PathBuf,
     };
 
+    use ioctl2::DriverError;
     use windows::{
         core::{GUID, PCWSTR},
         Win32::{
@@ -27,12 +29,9 @@ pub mod vhci {
     };
 
     use crate::{
-        containers::stacktools::StackStr,
         vhci::{base, error2::Error, AttachArgs},
-        BUS_ID_SIZE,
+        BusId, BUS_ID_SIZE,
     };
-
-    pub use ioctl::DoorError;
 
     use super::util;
 
@@ -46,31 +45,29 @@ pub mod vhci {
 
     pub struct DeviceLocation {
         host: SocketAddr,
-        bus_id: StackStr<BUS_ID_SIZE>,
+        busid: BusId<'static>,
     }
 
-    impl From<ioctl::OwnedDeviceLocation> for DeviceLocation {
-        fn from(value: ioctl::OwnedDeviceLocation) -> Self {
-            Self {
-                host: value.host,
-                bus_id: value.bus_id,
-            }
+    impl From<ioctl2::DeviceLocation<'static>> for DeviceLocation {
+        fn from(value: ioctl2::DeviceLocation<'static>) -> Self {
+            let ioctl2::DeviceLocation { host, busid } = value;
+            Self { host, busid }
         }
     }
 
     #[derive(Debug)]
     pub struct PortRecord {
         base: base::PortRecord,
-        port: u16
+        port: u16,
     }
 
-    impl From<ioctl::PortRecord> for PortRecord {
-        fn from(value: ioctl::PortRecord) -> Self {
-            let host = (&*value.host, value.service.parse().unwrap());
+    impl From<ioctl2::PortRecord<'_>> for PortRecord {
+        fn from(value: ioctl2::PortRecord) -> Self {
+            let host = (value.host.as_str(), value.service.as_str().parse().unwrap());
             Self {
                 base: base::PortRecord {
                     host: host.to_socket_addrs().unwrap().next().unwrap(),
-                    busid: value.busid,
+                    busid: value.busid.to_owned(),
                 },
                 port: value.port as u16,
             }
@@ -84,8 +81,8 @@ pub mod vhci {
         speed: crate::DeviceSpeed,
     }
 
-    impl From<ioctl::ImportedDevice> for WindowsImportedDevice {
-        fn from(value: ioctl::ImportedDevice) -> Self {
+    impl From<ioctl2::ImportedDevice<'_>> for WindowsImportedDevice {
+        fn from(value: ioctl2::ImportedDevice) -> Self {
             Self {
                 base: base::ImportedDevice {
                     vendor: value.vendor,
@@ -107,9 +104,45 @@ pub mod vhci {
         }
     }
 
-    impl<'a> From<AttachArgs<'a>> for ioctl::DeviceLocation<'a> {
-        fn from(value: AttachArgs<'a>) -> Self {
-            Self::new(value.host, value.bus_id)
+    #[derive(Debug, Clone, Copy)]
+    pub struct TryFromAttachArgsErr;
+
+    impl std::fmt::Display for TryFromAttachArgsErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "the given busid was greater than BUS_ID_SIZE ({})",
+                BUS_ID_SIZE - 1
+            )
+        }
+    }
+
+    impl std::error::Error for TryFromAttachArgsErr {}
+
+    impl<'a> TryFrom<AttachArgs<'a>> for ioctl2::DeviceLocation<'a> {
+        type Error = TryFromAttachArgsErr;
+
+        fn try_from(value: AttachArgs<'a>) -> Result<Self, Self::Error> {
+            Self::new(value.host, value.bus_id).ok_or(TryFromAttachArgsErr)
+        }
+    }
+
+    impl From<win_deviceioctl::Error<DriverError>> for Error {
+        fn from(err: win_deviceioctl::Error<DriverError>) -> Self {
+            match err {
+                win_deviceioctl::Error::Driver(DriverError::DevNotConnected) => {
+                    Error::WriteSys(std::io::ErrorKind::NotConnected.into())
+                }
+                win_deviceioctl::Error::Driver(DriverError::IncompatibleProtocolVersion)
+                | win_deviceioctl::Error::Driver(DriverError::InvalidAbi) => {
+                    Error::WriteSys(std::io::ErrorKind::InvalidData.into())
+                }
+                win_deviceioctl::Error::Io(io) => Error::WriteSys(io),
+                win_deviceioctl::Error::Driver(DriverError::FileNotFound) => {
+                    Error::WriteSys(std::io::ErrorKind::NotFound.into())
+                }
+                _ => unreachable!("Dev error in parsing data"),
+            }
         }
     }
 
@@ -134,48 +167,32 @@ pub mod vhci {
         }
 
         fn attach(&mut self, args: AttachArgs) -> crate::vhci::Result<u16> {
+            let device_location = ioctl2::DeviceLocation::try_from(args)
+                .map_err(|err| Error::UserInput(Box::from(err)))?;
             let port =
-                ioctl::relay(self.as_handle(), ioctl::Attach::new(args.into())).map_err(|err| {
-                    match err {
-                        DoorError::Io(io) => Error::WriteSys(io),
-                        _ => unreachable!("Developer error in parsing data"),
-                    }
-                })?;
+                win_deviceioctl::send_recv(self.as_handle(), ioctl2::Attach::new(device_location))
+                    .map_err(Error::from)?;
 
             Ok(port)
         }
 
         fn detach(&mut self, port: u16) -> crate::vhci::Result<()> {
-            ioctl::relay(self.as_handle(), ioctl::Detach::new(port)).map_err(|err| match err {
-                DoorError::Io(io) => Error::WriteSys(io),
-                _ => unreachable!("Developer error in parsing data"),
-            })
+            win_deviceioctl::send(self.as_handle(), ioctl2::Detach::new(port)).map_err(Error::from)
         }
 
         fn imported_devices(&self) -> crate::vhci::Result<WindowsImportedDevices> {
-            let idevs = ioctl::relay(self.as_handle(), ioctl::GetImportedDevices)
-                .map_err(|err| match err {
-                    DoorError::Io(io) => Error::WriteSys(io),
-                    err => Err(err).unwrap(),
-                })?
-                .into_iter()
-                .map(From::from)
-                .collect::<Vec<_>>();
-
-            Ok(WindowsImportedDevices(idevs.into_boxed_slice()))
+            win_deviceioctl::send_recv(self.as_handle(), ioctl2::GetImportedDevices)
+                .map_err(Error::from)
+                .map(|vec| WindowsImportedDevices(vec.into_boxed_slice()))
         }
 
-        fn persistent_devices(&self) -> crate::vhci::Result<Vec<DeviceLocation>> {
-            let dev_locs = ioctl::relay(self.as_handle(), ioctl::GetPersistentDevices)
-                .map_err(|err| match err {
-                    DoorError::Io(io) => Error::WriteSys(io),
-                    _ => unreachable!("Developer error in parsing data"),
-                })?
-                .into_iter()
-                .map(From::from)
-                .collect();
-
-            Ok(dev_locs)
+        fn persistent_devices(&self) -> crate::vhci::Result<Box<[DeviceLocation]>> {
+            let devs = match win_deviceioctl::recv(self.as_handle(), ioctl2::GetPersistentDevices) {
+                Ok(devs) => devs,
+                Err(win_deviceioctl::Error::Driver(DriverError::FileNotFound)) => Vec::new(),
+                Err(err) => Err(Error::from(err))?,
+            };
+            Ok(devs.into_iter().map(DeviceLocation::from).collect())
         }
 
         fn path() -> crate::vhci::Result<PathBuf> {
@@ -228,6 +245,16 @@ pub mod vhci {
         }
     }
 
+    pub trait WindowsVhciDriverExt {
+        fn persistent_devices(&self) -> crate::vhci::Result<Box<[DeviceLocation]>>;
+    }
+
+    impl WindowsVhciDriverExt for WindowsVhciDriver {
+        fn persistent_devices(&self) -> crate::vhci::Result<Box<[DeviceLocation]>> {
+            self.inner.persistent_devices()
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -240,18 +267,22 @@ pub mod vhci {
         #[test]
         fn imported_devices_doesnt_die() {
             let driver = WindowsVhciDriver::open().unwrap();
-
             driver.imported_devices().unwrap();
+        }
+
+        #[test]
+        fn get_persistent_doesnt_die() {
+            let driver = WindowsVhciDriver::open().unwrap();
+            driver.persistent_devices().unwrap();
         }
 
         #[test]
         fn detach_port_one() {
             let mut driver = WindowsVhciDriver::open().unwrap();
-
             if let Err(err) = driver.detach(1) {
                 match err {
                     Error::WriteSys(io) if io.kind() == std::io::ErrorKind::NotConnected => {}
-                    _ => panic!(),
+                    err => Err(err).unwrap(),
                 }
             }
         }

@@ -16,6 +16,7 @@ libc = "0.2.154"
 [target.'cfg(windows)'.dependencies]
 num-traits = "0.2.19"
 num-derive = "0.4.2"
+win-deviceioctl = { path = "../win-deviceioctl" }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.54.0"

@@ -310,7 +310,8 @@ pub mod net {
             &self,
             encoder: &mut E,
         ) -> Result<(), bincode::error::EncodeError> {
-            self.bus_id.as_ref().encode(encoder)
+            self.bus_id.as_ref().encode(encoder)?;
+            0u8.encode(encoder)
         }
     }
 

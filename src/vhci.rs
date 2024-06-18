@@ -4,6 +4,7 @@ pub mod error2 {
     /// The error type for VHCI operations.
     #[derive(Debug)]
     pub enum Error {
+        UserInput(Box<dyn std::error::Error>),
         NoFreePorts,
         PortNotInUse,
         DriverNotFound,
@@ -22,6 +23,7 @@ pub mod error2 {
     impl core::fmt::Display for Error {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
+                Error::UserInput(err) => write!(f, "Invalid user input: {err}"),
                 Error::NoFreePorts => write!(f, "No free port on USB/IP hub"),
                 Error::PortNotInUse => write!(f, "Port not in use"),
                 Error::DriverNotFound => write!(f, "VHCI device not found, is the driver loaded?"),

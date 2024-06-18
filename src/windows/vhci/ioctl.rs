@@ -53,6 +53,7 @@ use windows::Win32::System::IO::DeviceIoControl;
 use crate::containers::iterators::BitShiftLeft;
 use crate::containers::stacktools::StackStr;
 use crate::util::EncodedSize;
+use crate::util::__private::Sealed;
 use crate::{DeviceSpeed, BUS_ID_SIZE};
 
 use crate::windows::util::consts::{NI_MAXHOST, NI_MAXSERV};
@@ -148,7 +149,7 @@ impl<'a> SliceReader<'a> {
         }
     }
 
-    const fn len(&self) -> usize {
+    const fn initial_len(&self) -> usize {
         self.len
     }
 }
@@ -190,26 +191,82 @@ enum DriverError {
     DevNotConnected = 0x8007048F,
 }
 
-enum OutputFn<T, U: Iterator<Item = usize>, const B: usize> {
-    RecvDyn {
-        recv: fn(&mut IoctlDecoder) -> DecResult<T>,
-        regrow_strategy: fn() -> U,
-    },
-    RecvStatic {
-        recv: fn(&mut IoctlDecoder) -> DecResult<T>,
-    },
-    RecvNone(fn() -> T),
+pub trait ExpectRecv
+where
+    Self::RegrowIter: Iterator<Item = usize>,
+{
+    type RegrowIter;
+    type Output;
+    const FUNCTION: Function;
+    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult>;
+
+    fn recv(decoder: &mut IoctlDecoder) -> DecResult<Self::Output>;
+    fn regrow_strategy() -> Self::RegrowIter;
 }
 
-pub struct Output<T, U: Iterator<Item = usize>, const B: usize> {
-    inner: OutputFn<T, U, B>,
-}
+pub struct ExpectRecvWrapper<R: ExpectRecv>(R);
 
-impl<T, U: Iterator<Item = usize>, const B: usize> Output<T, U, B> {
-    const fn get(self) -> OutputFn<T, U, B> {
-        self.inner
+impl<R: ExpectRecv> Sealed for ExpectRecvWrapper<R> {}
+impl<R: ExpectRecv> IoControl2 for ExpectRecvWrapper<R> {
+    type RegrowIter = R::RegrowIter;
+    type Output = R::Output;
+
+    const FUNCTION: Function = <R as ExpectRecv>::FUNCTION;
+    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> = if R::SEND.is_some() {
+        Some(|wrapper, encoder| R::SEND.unwrap()(&wrapper.0, encoder))
+    } else {
+        None
+    };
+    const RECV: OutputType<Self::Output, Self::RegrowIter> = OutputType(OutputFn::Recv {
+        recv: R::recv,
+        regrow_strategy: R::regrow_strategy,
+    });
+}
+impl<R: ExpectRecv> From<R> for ExpectRecvWrapper<R> {
+    fn from(value: R) -> Self {
+        Self(value)
     }
 }
+
+pub trait NoRecv {
+    const FUNCTION: Function;
+
+    fn send(&self, encoder: &mut IoctlEncoder) -> EncResult;
+}
+
+pub struct NoRecvWrapper<N: NoRecv>(N);
+
+impl<N: NoRecv> Sealed for NoRecvWrapper<N> {}
+impl<N: NoRecv> IoControl2 for NoRecvWrapper<N> {
+    type RegrowIter = NoIter;
+    type Output = ();
+
+    const FUNCTION: Function = N::FUNCTION;
+
+    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> =
+        Some(|wrapper, encoder| wrapper.0.send(encoder));
+
+    const RECV: OutputType<Self::Output, Self::RegrowIter> = OutputType(OutputFn::Create {
+        create: Default::default,
+    });
+}
+impl<N: NoRecv> From<N> for NoRecvWrapper<N> {
+    fn from(value: N) -> Self {
+        Self(value)
+    }
+}
+
+enum OutputFn<T, I: Iterator<Item = usize>> {
+    Recv {
+        recv: fn(&mut IoctlDecoder) -> DecResult<T>,
+        regrow_strategy: fn() -> I,
+    },
+    Create {
+        create: fn() -> T,
+    },
+}
+
+pub struct OutputType<T, I: Iterator<Item = usize>>(OutputFn<T, I>);
 
 /// The main trait for defining an ioctl function
 /// for the vhci driver.
@@ -224,7 +281,7 @@ impl<T, U: Iterator<Item = usize>, const B: usize> Output<T, U, B> {
 ///     how to produce [`IoControl::Output`]
 ///
 /// # Why aren't [`IoControl::SEND`] and [`IoControl::RECV`] just normal trait functions?
-pub trait IoControl<const B: usize>
+pub trait IoControl2: Sealed
 where
     Self::RegrowIter: Iterator<Item = usize>,
 {
@@ -232,14 +289,12 @@ where
     type Output;
     const FUNCTION: Function;
     const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult>;
-    const RECV: Output<Self::Output, Self::RegrowIter, B>;
-
-    #[inline(always)]
+    const RECV: OutputType<Self::Output, Self::RegrowIter>;
     fn ctrl_code() -> ControlCode {
         ControlCode(
             DeviceType::Unknown,
             RequiredAccess::READ_WRITE_DATA,
-            <Self as IoControl<B>>::FUNCTION.to_u32().unwrap(),
+            Self::FUNCTION.to_u32().unwrap(),
             TransferMethod::Buffered,
         )
     }
@@ -252,22 +307,6 @@ pub enum Function {
     GetImportedDevices,
     SetPersistent,
     GetPersistent,
-}
-
-pub struct OnceSize {
-    byte_size: usize,
-    called: u32,
-}
-
-impl Iterator for OnceSize {
-    type Item = usize;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.called == 2 {
-            panic!("function called more than twice!")
-        }
-        self.called += 1;
-        Some(self.byte_size)
-    }
 }
 
 pub struct NoIter;
@@ -320,18 +359,13 @@ impl Detach {
     }
 }
 
-impl IoControl<UNUSED> for Detach {
-    type Output = ();
-    type RegrowIter = NoIter;
+impl NoRecv for Detach {
     const FUNCTION: Function = Function::PlugoutHardware;
-    const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> = Some(|ioctl, encoder| {
+    fn send(&self, encoder: &mut IoctlEncoder) -> EncResult {
         let size = (Port::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32;
         size.encode(encoder)?;
-        ioctl.port.encode(encoder)
-    });
-    const RECV: Output<Self::Output, Self::RegrowIter, UNUSED> = Output {
-        inner: OutputFn::RecvNone(Default::default),
-    };
+        self.port.encode(encoder)
+    }
 }
 
 /// Used to request for the vhci driver
@@ -342,15 +376,14 @@ pub struct Attach<'a> {
 }
 
 impl<'a> Attach<'a> {
-    const B: usize = { core::mem::size_of::<i32>() + core::mem::size_of::<u32>() };
     pub const fn new(location: DeviceLocation<'a>) -> Self {
         Self { location }
     }
 }
 
-impl IoControl<{ Attach::B }> for Attach<'_> {
+impl ExpectRecv for Attach<'_> {
     type Output = u16;
-    type RegrowIter = NoIter;
+    type RegrowIter = BitShiftLeft;
     const FUNCTION: Function = Function::PluginHardware;
     const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> =
         Some(|ioctl: &Self, encoder| {
@@ -359,16 +392,19 @@ impl IoControl<{ Attach::B }> for Attach<'_> {
             ioctl.location.encode(encoder)?;
             Ok(())
         });
-    const RECV: Output<Self::Output, Self::RegrowIter, { Attach::B }> = Output {
-        inner: OutputFn::RecvStatic {
-            recv: |decoder| {
-                decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
-                decoder.reader().consume(core::mem::size_of::<u32>());
-                let port = Port::decode(decoder)?;
-                Ok(port.get())
-            },
-        },
-    };
+    fn recv(decoder: &mut IoctlDecoder) -> DecResult<Self::Output> {
+        decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
+        decoder.reader().consume(core::mem::size_of::<u32>());
+        let port = Port::decode(decoder)?;
+        Ok(port.get())
+    }
+
+    fn regrow_strategy() -> Self::RegrowIter {
+        BitShiftLeft::new(
+            NonZeroU32::new(u32::MAX).unwrap(),
+            Port::ENCODED_SIZE_OF + core::mem::size_of::<u32>(),
+        )
+    }
 }
 
 /// A helper struct for encoding/decoding
@@ -461,7 +497,7 @@ impl bincode::Encode for PortRecord {
 
 pub struct GetImportedDevices;
 
-impl IoControl<UNUSED> for GetImportedDevices {
+impl ExpectRecv for GetImportedDevices {
     type Output = Vec<ImportedDevice>;
     type RegrowIter =
         std::iter::Map<crate::containers::iterators::BitShiftLeft, fn(usize) -> usize>;
@@ -470,33 +506,30 @@ impl IoControl<UNUSED> for GetImportedDevices {
         SizeOf((ImportedDevice::ENCODED_SIZE_OF + core::mem::size_of::<u32>()) as u32)
             .encode(encoder)
     });
-    const RECV: Output<Self::Output, Self::RegrowIter, UNUSED> = Output {
-        inner: OutputFn::RecvDyn {
-            recv: |decoder| {
-                decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
-                decoder.reader().consume(core::mem::size_of::<u32>());
 
-                let buf_len = decoder.borrow_reader().len();
-                let len = (buf_len - core::mem::size_of::<u32>()) / ImportedDevice::ENCODED_SIZE_OF;
-                let mut buf = Vec::with_capacity(len);
+    fn recv(decoder: &mut IoctlDecoder) -> DecResult<Self::Output> {
+        decoder.claim_bytes_read(core::mem::size_of::<u32>())?;
+        decoder.reader().consume(core::mem::size_of::<u32>());
 
-                decoder.claim_container_read::<[u8; ImportedDevice::ENCODED_SIZE_OF]>(len)?;
+        let buf_len = decoder.borrow_reader().initial_len();
+        let len = (buf_len - core::mem::size_of::<u32>()) / ImportedDevice::ENCODED_SIZE_OF;
+        let mut buf = Vec::with_capacity(len);
 
-                for _ in 0..len {
-                    decoder.unclaim_bytes_read(ImportedDevice::ENCODED_SIZE_OF);
+        decoder.claim_container_read::<[u8; ImportedDevice::ENCODED_SIZE_OF]>(len)?;
 
-                    let idev = ImportedDevice::decode(decoder)?;
-                    buf.push(idev);
-                }
+        for _ in 0..len {
+            decoder.unclaim_bytes_read(ImportedDevice::ENCODED_SIZE_OF);
 
-                Ok(buf)
-            },
-            regrow_strategy: || {
-                BitShiftLeft::new(NonZeroU32::new(1).unwrap(), ImportedDevice::ENCODED_SIZE_OF)
-                    .map(|x| x + core::mem::size_of::<u32>())
-            },
-        },
-    };
+            let idev = ImportedDevice::decode(decoder)?;
+            buf.push(idev);
+        }
+
+        Ok(buf)
+    }
+    fn regrow_strategy() -> Self::RegrowIter {
+        BitShiftLeft::new(NonZeroU32::new(1).unwrap(), ImportedDevice::ENCODED_SIZE_OF)
+            .map(|x| x + core::mem::size_of::<u32>())
+    }
 }
 
 #[derive(bincode::Encode, bincode::Decode)]
@@ -584,38 +617,32 @@ unsafe impl EncodedSize for WideChar {
 
 pub struct GetPersistentDevices;
 
-impl IoControl<UNUSED> for GetPersistentDevices {
+impl ExpectRecv for GetPersistentDevices {
     type Output = Vec<OwnedDeviceLocation>;
     type RegrowIter = BitShiftLeft;
     const FUNCTION: Function = Function::GetPersistent;
     const SEND: Option<fn(&Self, &mut IoctlEncoder) -> EncResult> = None;
-    const RECV: Output<Self::Output, Self::RegrowIter, UNUSED> = Output {
-        inner: OutputFn::RecvDyn {
-            recv: |decoder| {
-                let len = decoder.borrow_reader().len();
-                let buf = decoder.borrow_reader().take_bytes(len)?;
+    fn recv(decoder: &mut IoctlDecoder) -> DecResult<Self::Output> {
+        let len = decoder.borrow_reader().initial_len();
+        let buf = decoder.borrow_reader().take_bytes(len)?;
 
-                // Now we're going to be silly.
-                // This will panic if not properly aligned, which will
-                // definitely mean that I did something wrong.
-                let phat_buf = crate::windows::util::cast_u8_to_u16_slice(buf);
+        // Now we're going to be silly.
+        // This will panic if not properly aligned, which will
+        // definitely mean that I did something wrong.
+        let phat_buf = crate::windows::util::cast_u8_to_u16_slice(buf);
 
-                // If this fails this might also be my fault, not sure
-                Ok(String::from_utf16(phat_buf)
-                    .map_err(|_| {
-                        bincode::error::DecodeError::Other(
-                            "Failed to decode UTF-16 slice as String",
-                        )
-                    })?
-                    .split_terminator('\0')
-                    .filter_map(|s| s.parse::<OwnedDeviceLocation>().ok())
-                    .collect::<Self::Output>())
-            },
-            regrow_strategy: || {
-                crate::containers::iterators::BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 32)
-            },
-        },
-    };
+        // If this fails this might also be my fault, not sure
+        Ok(String::from_utf16(phat_buf)
+            .map_err(|_| {
+                bincode::error::DecodeError::Other("Failed to decode UTF-16 slice as String")
+            })?
+            .split_terminator('\0')
+            .filter_map(|s| s.parse::<OwnedDeviceLocation>().ok())
+            .collect::<Self::Output>())
+    }
+    fn regrow_strategy() -> Self::RegrowIter {
+        crate::containers::iterators::BitShiftLeft::new(NonZeroU32::new(1).unwrap(), 32)
+    }
 }
 
 #[derive(Debug)]
@@ -653,7 +680,7 @@ impl From<std::io::Error> for DoorError {
     }
 }
 
-fn encode_to_vec<I: IoControl<B>, const B: usize>(
+fn encode_to_vec<I: IoControl2>(
     ioctl: &I,
     config: BincodeConfig,
 ) -> Result<Option<Vec<u8>>, bincode::error::EncodeError> {
@@ -676,19 +703,17 @@ fn encode_to_vec<I: IoControl<B>, const B: usize>(
         .transpose()
 }
 
-pub fn relay<I: IoControl<B>, const B: usize>(
-    handle: BorrowedHandle,
-    ioctl: I,
-) -> Result<I::Output, DoorError> {
+pub fn relay<I: IoControl2>(handle: BorrowedHandle, ioctl: impl Into<I>) -> Result<I::Output, DoorError> {
     let config = bincode_config();
     let code = I::ctrl_code().into_u32();
     let mut door = Door::new(handle, code);
+    let ioctl = ioctl.into();
 
     let input = encode_to_vec(&ioctl, config)?;
     let input_ref = input.as_ref().map(|buf| buf.as_slice());
 
-    match I::RECV.get() {
-        OutputFn::RecvDyn {
+    match I::RECV.0 {
+        OutputFn::Recv {
             recv,
             regrow_strategy,
         } => {
@@ -721,24 +746,13 @@ pub fn relay<I: IoControl<B>, const B: usize>(
                     }
                 }
             }
+            assert!(door.end_of_req);
+
             let reader = SliceReader::new(&output);
             let mut decoder = bincode::de::DecoderImpl::new(reader, config);
             Ok(recv(&mut decoder)?)
         }
-        OutputFn::RecvStatic { recv } => {
-            let mut output = [0u8; B];
-            let bytes_read = door.read_write(input_ref, Some(&mut output))?;
-            
-            // Following the same idea as above, the first call should have written all the
-            // data to the output buffer, or else we hit some error. Therefore,
-            // the next call to read_write should return Ok(0), or else we caused a bug.
-            assert_eq!(door.read_write(input_ref, Some(&mut output[bytes_read..]))?, 0);
-
-            let reader = SliceReader::new(&output[..bytes_read]);
-            let mut decoder = bincode::de::DecoderImpl::new(reader, config);
-            Ok(recv(&mut decoder)?)
-        }
-        OutputFn::RecvNone(create) => {
+        OutputFn::Create { create } => {
             door.read_write(input_ref, None)?;
             Ok(create())
         }

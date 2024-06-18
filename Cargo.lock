@@ -169,6 +169,7 @@ dependencies = [
  "num-derive",
  "num-traits",
  "udev",
+ "win-deviceioctl",
  "windows",
 ]
 
@@ -177,6 +178,17 @@ name = "virtue"
 version = "0.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9dcc60c0624df774c82a0ef104151231d37da4962957d691c011c852b2473314"
+
+[[package]]
+name = "win-deviceioctl"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bitflags",
+ "num-derive",
+ "num-traits",
+ "windows",
+]
 
 [[package]]
 name = "windows"
